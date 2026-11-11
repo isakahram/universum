@@ -1,10 +1,10 @@
-"""LLM-клиент: бесплатная нейросеть без ключей (Pollinations + Ollama fallback).
+"""LLM-клиент: Pollinations (без ключа) + провайдеры с ключом + Ollama fallback.
 
 Реализован на стандартной библиотеке urllib (без внешних зависимостей),
 с retry, таймаутами и цепочкой эндпоинтов. OpenAI-совместимый формат.
 
-Основной эндпоинт: https://text.pollinations.ai/openai (бесплатно, без ключа).
-Fallback: локальный Ollama (http://localhost:11434), если запущен.
+Ключ отправляется только на удалённый эндпоинт (не на localhost) и никогда
+не пишется в логи (только замаскированный вид).
 """
 
 from __future__ import annotations
@@ -15,50 +15,61 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
-from .config import LlmConfig, get_config
+from .config import LlmConfig, get_config, mask_key
 from .utils import LlmError, get_logger, log_event
 
 ProgressFn = Callable[[str], None]
 
 
-def _post_json(url: str, payload: dict, timeout: int) -> dict:
-    """Выполнить POST с JSON и вернуть распарсенный ответ.
+def friendly_network_error(reason: object, url: str = "") -> str:
+    """Перевести сетевую ошибку в понятное русское сообщение.
 
     Args:
-        url: URL эндпоинта.
-        payload: Тело запроса.
-        timeout: Таймаут в секундах.
+        reason: Причина из URLError (может быть OSError с errno).
+        url: URL эндпоинта (для подсказки про localhost).
 
     Returns:
-        Распарсенный JSON-ответ.
-
-    Raises:
-        LlmError: При сетевой/HTTP ошибке.
+        Дружелюбное сообщение на русском.
     """
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "Universum/1.0"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return json.loads(body)
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-        raise LlmError(f"HTTP {e.code} от LLM-сервиса: {detail}") from e
-    except urllib.error.URLError as e:
-        raise LlmError(f"Сеть недоступна: {e.reason}") from e
-    except TimeoutError as e:
-        raise LlmError("LLM-сервис не ответил вовремя (таймаут).") from e
-    except json.JSONDecodeError as e:
-        raise LlmError("LLM-сервис вернул не-JSON ответ.") from e
+    text = str(reason)
+    is_local = "localhost" in (url or "") or "127.0.0.1" in (url or "")
+    # WinError 10061 / Connection refused
+    if "10061" in text or "Connection refused" in text or "Errno 111" in text:
+        if is_local:
+            return (
+                "Локальный Ollama не запущен (подключение отклонено). "
+                "Запустите Ollama (ollama serve) или выберите другой провайдер в «Настройках нейросети»."
+            )
+        return (
+            "Сервис отклонил подключение (WinError 10061). Проверьте интернет, "
+            "файрвол/антивирус и правильность URL в «Настройках нейросети»."
+        )
+    if "Name or service not known" in text or "getaddrinfo failed" in text or "NameResolutionError" in text:
+        return "Не удалось разрешить адрес сервера (DNS). Проверьте интернет и URL."
+    if "timed out" in text.lower() or "timeout" in text.lower():
+        return "Сервер не ответил вовремя (таймаут). Попробуйте ещё раз через минуту."
+    if "SSL" in text or "certificate" in text.lower():
+        return f"Ошибка SSL/TLS при подключении: {text[:200]}. Проверьте дату/время системы и интернет."
+    return f"Сеть недоступна: {text[:300]}"
+
+
+def friendly_http_error(code: int, detail: str) -> str:
+    """Перевести HTTP-ошибку провайдера в понятное сообщение."""
+    d = (detail or "")[:300]
+    if code in (401, 403):
+        return (
+            f"Провайдер отклонил ключ (HTTP {code}). Проверьте, что ключ верный и не отозван, "
+            f"и что URL соответствует провайдеру. Ответ сервера: {d}"
+        )
+    if code == 404:
+        return (
+            f"Эндпоинт не найден (HTTP 404). Проверьте URL и модель в «Настройках нейросети». Ответ: {d}"
+        )
+    if code == 429:
+        return f"Превышен лимит запросов (HTTP 429). Подождите минуту и попробуйте снова. Ответ: {d}"
+    if code >= 500:
+        return f"Сервер провайдера временно недоступен (HTTP {code}). Попробуйте через минуту. Ответ: {d}"
+    return f"HTTP {code} от LLM-сервиса: {d}"
 
 
 def _extract_content(response: dict) -> str:
@@ -84,7 +95,7 @@ def _extract_content(response: dict) -> str:
 
 
 class LlmClient:
-    """Клиент бесплатной нейросети с retry и fallback-цепочкой."""
+    """Клиент нейросети с retry и fallback-цепочкой. Поддерживает API-ключ."""
 
     def __init__(self, config: LlmConfig | None = None) -> None:
         self.config = config or get_config().llm
@@ -110,15 +121,16 @@ class LlmClient:
             Текст ответа модели.
 
         Raises:
-            LlmError: Если все эндпоинты недоступны.
+            LlmError: Если все эндпоинты недоступны (с объединёнными ошибками).
         """
-        last_error: Exception | None = None
-        for url, model in self.config.endpoints:
+        errors: list[str] = []
+        for url, model, send_key in self.config.endpoints:
             if cancel_event is not None and cancel_event.is_set():
                 raise LlmError("Генерация отменена пользователем.")
             if progress:
                 progress(f"Запрос к нейросети ({model})…")
-            log_event(f"LLM request url={url} model={model} prompt_chars={len(user_prompt)}")
+            # Ключ в лог не пишем — только замаскированный вид
+            log_event(f"LLM request url={url} model={model} key={mask_key(self.config.api_key) if send_key else 'no-key'} prompt_chars={len(user_prompt)}")
             payload = {
                 "model": model,
                 "messages": [
@@ -129,38 +141,67 @@ class LlmClient:
                 "max_tokens": self.config.max_tokens,
             }
             headers: dict[str, str] = {}
-            if self.config.api_key:
-                headers["Authorization"] = f"Bearer {self.config.api_key}"
-            # Retry внутри одного эндпоинта
+            if send_key and self.config.api_key.strip():
+                headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
+            endpoint_error = ""
             for attempt in range(1, self.config.max_retries + 1):
                 if cancel_event is not None and cancel_event.is_set():
                     raise LlmError("Генерация отменена пользователем.")
                 try:
-                    # urllib не поддерживает кастомные headers через _post_json — передаём через payload trick:
-                    # временно добавляем ключ в payload не нужно; используем прямой вызов с headers
                     result = self._post_with_headers(url, payload, headers)
                     content = _extract_content(result)
                     log_event(f"LLM success url={url} chars={len(content)}")
                     return content
                 except LlmError as e:
-                    last_error = e
+                    endpoint_error = str(e)
                     self.logger.warning("LLM attempt %d/%d failed url=%s: %s", attempt, self.config.max_retries, url, e)
                     if attempt < self.config.max_retries:
                         time.sleep(self.config.retry_backoff_sec * attempt)
-            # Следующий эндпоинт в цепочке
+            if endpoint_error:
+                errors.append(f"{url} ({model}): {endpoint_error}")
             self.logger.warning("Endpoint %s exhausted, trying next", url)
+        details = "\n".join(errors) if errors else "нет деталей"
         raise LlmError(
-            f"Нейросеть недоступна. Последняя ошибка: {last_error}. "
-            "Проверьте интернет или запустите локальный Ollama (ollama serve)."
-        ) from last_error
+            "Нейросеть недоступна. Проверьте интернет, URL/модель/ключ в «Настройках нейросети».\n"
+            f"Ошибки по эндпоинтам:\n{details}"
+        )
 
-    def _post_with_headers(self, url: str, payload: dict, headers: dict[str, str]) -> dict:
-        """POST с дополнительными заголовками (для опционального API-ключа)."""
+    def test_connection(self, *, timeout: int = 30) -> tuple[bool, str]:
+        """Проверить соединение с первым эндпоинтом (лёгкий пробный запрос).
+
+        Args:
+            timeout: Таймаут в секундах.
+
+        Returns:
+            (ok, сообщение на русском).
+        """
+        endpoints = self.config.endpoints
+        if not endpoints:
+            return False, "Нет настроенных эндпоинтов."
+        url, model, send_key = endpoints[0]
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+        headers: dict[str, str] = {}
+        if send_key and self.config.api_key.strip():
+            headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
+        try:
+            result = self._post_with_headers(url, payload, headers, timeout=timeout)
+            _extract_content(result)
+            return True, f"Соединение OK: {url} ({model}). Ключ: {mask_key(self.config.api_key) if send_key else 'не требуется'}."
+        except LlmError as e:
+            return False, str(e)
+
+    def _post_with_headers(self, url: str, payload: dict, headers: dict[str, str], timeout: int | None = None) -> dict:
+        """POST с дополнительными заголовками (Authorization — только если передан)."""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req_headers = {"Content-Type": "application/json", "User-Agent": "Universum/1.0", **headers}
         req = urllib.request.Request(url, data=data, headers=req_headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+            with urllib.request.urlopen(req, timeout=timeout or self.config.timeout_sec) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
                 return json.loads(body)
         except urllib.error.HTTPError as e:
@@ -169,9 +210,9 @@ class LlmClient:
                 detail = e.read().decode("utf-8", errors="replace")[:500]
             except Exception:
                 pass
-            raise LlmError(f"HTTP {e.code} от LLM-сервиса: {detail}") from e
+            raise LlmError(friendly_http_error(e.code, detail)) from e
         except urllib.error.URLError as e:
-            raise LlmError(f"Сеть недоступна: {e.reason}") from e
+            raise LlmError(friendly_network_error(e.reason, url)) from e
         except TimeoutError as e:
             raise LlmError("LLM-сервис не ответил вовремя (таймаут).") from e
         except json.JSONDecodeError as e:

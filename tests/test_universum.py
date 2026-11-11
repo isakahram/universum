@@ -9,8 +9,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from universum.config import DocType, Style, Volume
+from universum.config import (
+    PROVIDER_PRESETS,
+    DocType,
+    LlmConfig,
+    LlmProvider,
+    LlmSettings,
+    Style,
+    Volume,
+    is_localhost_url,
+    mask_key,
+)
 from universum.file_parser import parse_file
+from universum.llm_client import friendly_http_error, friendly_network_error
 from universum.prompts import (
     SYSTEM_PROMPT,
     build_generation_prompt,
@@ -125,6 +136,57 @@ def test_parse_unsupported(tmp_path):
     f.write_text("hi")
     with pytest.raises(Exception):
         parse_file(str(f))
+
+
+def test_mask_key():
+    assert mask_key("") == "(не задан)"
+    assert mask_key("sk-abcdefgh1234") == "sk-...1234"
+    assert "abcdefgh" not in mask_key("sk-abcdefgh1234")
+
+
+def test_is_localhost_url():
+    assert is_localhost_url("http://localhost:11434/v1/chat/completions")
+    assert is_localhost_url("http://127.0.0.1:11434/")
+    assert not is_localhost_url("https://api.openai.com/v1/chat/completions")
+
+
+def test_provider_presets():
+    assert PROVIDER_PRESETS[LlmProvider.OPENAI]["url"] == "https://api.openai.com/v1/chat/completions"
+    assert PROVIDER_PRESETS[LlmProvider.POLLINATIONS]["needs_key"] is False
+    assert PROVIDER_PRESETS[LlmProvider.OPENAI]["needs_key"] is True
+
+
+def test_settings_resolved():
+    s = LlmSettings(provider=LlmProvider.OPENAI)
+    assert s.resolved_url() == "https://api.openai.com/v1/chat/completions"
+    assert s.resolved_model() == "gpt-4o-mini"
+    s2 = LlmSettings(provider=LlmProvider.CUSTOM, url="https://x.example/v1", model="m1")
+    assert s2.resolved_url() == "https://x.example/v1"
+    assert "sk-" not in repr(s2)  # ключ не в repr
+
+
+def test_config_from_settings_sends_key_only_remote():
+    s = LlmSettings(provider=LlmProvider.OPENAI, api_key="sk-testkey1234")
+    cfg = LlmConfig.from_settings(s)
+    eps = cfg.endpoints
+    # Первый эндпоинт — OpenAI с ключом
+    assert eps[0][0] == "https://api.openai.com/v1/chat/completions"
+    assert eps[0][2] is True
+    # Ollama всегда без ключа
+    assert eps[-1][2] is False
+
+
+def test_config_pollinations_no_key():
+    s = LlmSettings(provider=LlmProvider.POLLINATIONS)
+    cfg = LlmConfig.from_settings(s)
+    assert cfg.endpoints[0][2] is False
+
+
+def test_friendly_errors():
+    assert "Ollama" in friendly_network_error("[WinError 10061] ...", "http://localhost:11434/")
+    assert "10061" in friendly_network_error("[WinError 10061] ...", "https://api.openai.com/")
+    assert "ключ" in friendly_http_error(401, "bad key").lower()
+    assert "лимит" in friendly_http_error(429, "").lower()
 
 
 def test_orchestrator_mocked(tmp_path, monkeypatch):

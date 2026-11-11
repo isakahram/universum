@@ -52,6 +52,21 @@ class Orchestrator:
         self.logger = get_logger()
         self.llm = LlmClient(self.config.llm)
 
+    def reload_llm_config(self) -> None:
+        """Перечитать настройки нейросети (после изменения в GUI)."""
+        from .config import LlmConfig, load_llm_settings
+
+        settings = load_llm_settings()
+        self.config = AppConfig(
+            llm=LlmConfig.from_settings(settings),
+            search=self.config.search,
+            latex=self.config.latex,
+            limits=self.config.limits,
+            logs_dir=self.config.logs_dir,
+            temp_dir=self.config.temp_dir,
+        )
+        self.llm = LlmClient(self.config.llm)
+
     def generate(
         self,
         req: GenerationRequest,

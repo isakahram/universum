@@ -14,7 +14,19 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .config import DocType, Style, Volume
+from .config import (
+    PROVIDER_PRESETS,
+    DocType,
+    LlmConfig,
+    LlmProvider,
+    LlmSettings,
+    Style,
+    Volume,
+    load_llm_settings,
+    mask_key,
+    save_llm_settings,
+)
+from .llm_client import LlmClient
 from .orchestrator import GenerationRequest, Orchestrator
 from .utils import LatexCompileError, UniversumError, get_logger
 
@@ -81,8 +93,11 @@ class UniversumApp(tk.Tk):
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
 
-        # Заголовок
-        ttk.Label(root, text="Universum — учебные материалы в PDF (LaTeX + нейросеть, бесплатно)", font=("TkDefaultFont", 11, "bold")).pack(anchor="w", pady=(0, 6))
+        # Заголовок + настройки
+        header = ttk.Frame(root)
+        header.pack(fill="x", pady=(0, 6))
+        ttk.Label(header, text="Universum — учебные материалы в PDF (LaTeX + нейросеть)", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        ttk.Button(header, text="⚙ Настройки нейросети", command=self._open_settings).pack(side="right")
 
         # 1. Запрос
         ttk.Label(root, text="1. Запрос: тема, аспекты, пожелания (или инструкция к файлу):").pack(anchor="w")
@@ -152,7 +167,7 @@ class UniversumApp(tk.Tk):
 
         ttk.Label(
             root,
-            text="Без API-ключей и оплаты. История не сохраняется. Первый запуск может скачать LaTeX-движок Tectonic (~30 МБ).",
+            text="По умолчанию — бесплатно без ключа (Pollinations). Ключ провайдера можно указать в «Настройках нейросети». История не сохраняется. Первый запуск может скачать LaTeX-движок Tectonic (~30 МБ).",
             foreground="gray",
             font=("TkDefaultFont", 8),
         ).pack(anchor="w", pady=(6, 0))
@@ -213,9 +228,122 @@ class UniversumApp(tk.Tk):
             use_web_search=bool(self.search_var.get()),
         )
 
+    def _open_settings(self) -> None:
+        """Окно настроек нейросети: провайдер, URL, модель, API-ключ."""
+        win = tk.Toplevel(self)
+        win.title("Настройки нейросети")
+        win.geometry("560x420")
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        settings = load_llm_settings()
+
+        form = ttk.Frame(win, padding=12)
+        form.pack(fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="Провайдер:").grid(row=0, column=0, sticky="w", pady=4)
+        provider_labels = [p.label_ru for p in LlmProvider]
+        provider_var = tk.StringVar(value=settings.provider.label_ru)
+        provider_combo = ttk.Combobox(form, textvariable=provider_var, values=provider_labels, state="readonly", width=48)
+        provider_combo.grid(row=0, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        ttk.Label(form, text="URL эндпоинта:").grid(row=1, column=0, sticky="w", pady=4)
+        url_var = tk.StringVar(value=settings.url)
+        url_entry = ttk.Entry(form, textvariable=url_var)
+        url_entry.grid(row=1, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        ttk.Label(form, text="Модель:").grid(row=2, column=0, sticky="w", pady=4)
+        model_var = tk.StringVar(value=settings.model)
+        model_entry = ttk.Entry(form, textvariable=model_var)
+        model_entry.grid(row=2, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        ttk.Label(form, text="API-ключ:").grid(row=3, column=0, sticky="w", pady=4)
+        key_var = tk.StringVar(value=settings.api_key)
+        key_entry = ttk.Entry(form, textvariable=key_var, show="•")
+        key_entry.grid(row=3, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        show_var = tk.BooleanVar(value=False)
+
+        def _toggle_show() -> None:
+            key_entry.config(show="" if show_var.get() else "•")
+
+        ttk.Checkbutton(form, text="Показать ключ", variable=show_var, command=_toggle_show).grid(row=4, column=1, sticky="w", pady=2)
+
+        ttk.Label(
+            form,
+            text="Ключ хранится в системном хранилище (Credential Manager/Keychain) или ~/.universum/ с правами 0600.\nОн никогда не попадает в репозиторий и логи. Для Pollinations/Ollama ключ не нужен.",
+            foreground="gray",
+            font=("TkDefaultFont", 8),
+            wraplength=500,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 4))
+
+        status_var = tk.StringVar(value=f"Текущий ключ: {mask_key(settings.api_key)}")
+        ttk.Label(form, textvariable=status_var, foreground="gray", font=("TkDefaultFont", 8)).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        def _on_provider_changed(_event=None) -> None:
+            label = provider_var.get()
+            for p in LlmProvider:
+                if p.label_ru == label:
+                    preset = PROVIDER_PRESETS.get(p, {})
+                    # Подставляем пресет, только если поля пустые или совпадают с другим пресетом
+                    if not url_var.get().strip():
+                        url_var.set(str(preset.get("url", "")))
+                    if not model_var.get().strip():
+                        model_var.set(str(preset.get("model", "")))
+                    break
+
+        provider_combo.bind("<<ComboboxSelected>>", _on_provider_changed)
+
+        def _collect() -> LlmSettings:
+            provider = LlmProvider.POLLINATIONS
+            for p in LlmProvider:
+                if p.label_ru == provider_var.get():
+                    provider = p
+                    break
+            return LlmSettings(provider=provider, url=url_var.get().strip(), model=model_var.get().strip(), api_key=key_var.get().strip())
+
+        def _on_save() -> None:
+            try:
+                save_llm_settings(_collect())
+                self.orchestrator.reload_llm_config()
+                status_var.set(f"Сохранено. Ключ: {mask_key(key_var.get().strip())}")
+                messagebox.showinfo("Universum", "Настройки сохранены.")
+            except Exception as e:
+                messagebox.showerror("Universum", f"Не удалось сохранить настройки: {e}")
+
+        def _on_test() -> None:
+            status_var.set("Проверка соединения…")
+            win.update_idletasks()
+            s = _collect()
+            client = LlmClient(LlmConfig.from_settings(s))
+            ok, msg = client.test_connection()
+            status_var.set(msg)
+            if ok:
+                messagebox.showinfo("Universum", msg)
+            else:
+                messagebox.showerror("Universum", msg)
+
+        def _on_clear_key() -> None:
+            key_var.set("")
+            status_var.set("Ключ очищен (нажмите «Сохранить»).")
+
+        btns = ttk.Frame(form)
+        btns.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(btns, text="Проверить соединение", command=_on_test).pack(side="left")
+        ttk.Button(btns, text="Очистить ключ", command=_on_clear_key).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Сохранить", command=_on_save).pack(side="right")
+        ttk.Button(btns, text="Закрыть", command=win.destroy).pack(side="right", padx=(0, 8))
+
     def _on_generate(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             return
+        # Всегда перечитываем настройки (могли изменить в окне настроек)
+        try:
+            self.orchestrator.reload_llm_config()
+        except Exception:
+            pass
         req = self._collect_request()
         if not req.request_text and not req.file_path:
             messagebox.showwarning("Universum", "Введите запрос или загрузите файл — иначе не из чего делать документ.")

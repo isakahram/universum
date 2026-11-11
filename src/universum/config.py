@@ -1,12 +1,14 @@
 """Конфигурация приложения Universum.
 
 Все параметры собраны в одном месте: эндпоинты LLM, лимиты, стили,
-типы документов, пути. Никаких платных ключей не требуется.
+типы документов, пути.
 
-Переменные окружения (опционально, для продвинутых пользователей):
-    UNIVERSUM_LLM_URL   — свой OpenAI-совместимый эндпоинт (по умолчанию Pollinations).
-    UNIVERSUM_LLM_MODEL — модель (по умолчанию openai-fast / gpt-4o-mini на Pollinations).
-    UNIVERSUM_LLM_KEY   — ключ только если ваш эндпоинт его требует (по умолчанию не нужен).
+По умолчанию ключи не требуются (Pollinations). Если у вас есть ключ
+провайдера (OpenAI/OpenRouter/DeepSeek и т.п.), его можно указать:
+- через GUI «Настройки нейросети» (сохраняется в OS keyring или ~/.universum/);
+- или через переменные окружения UNIVERSUM_LLM_URL / UNIVERSUM_LLM_MODEL / UNIVERSUM_LLM_KEY.
+
+Ключ никогда не пишется в репозиторий и не логируется.
 """
 
 from __future__ import annotations
@@ -80,33 +82,249 @@ class Style(str, Enum):
 # LLM
 # ---------------------------------------------------------------------------
 
+class LlmProvider(str, Enum):
+    """Провайдер нейросети (OpenAI-совместимый API)."""
+
+    POLLINATIONS = "pollinations"
+    OPENAI = "openai"
+    OPENROUTER = "openrouter"
+    DEEPSEEK = "deepseek"
+    OLLAMA = "ollama"
+    CUSTOM = "custom"
+
+    @property
+    def label_ru(self) -> str:
+        return {
+            LlmProvider.POLLINATIONS: "Pollinations (бесплатно, без ключа)",
+            LlmProvider.OPENAI: "OpenAI (нужен ключ)",
+            LlmProvider.OPENROUTER: "OpenRouter (нужен ключ)",
+            LlmProvider.DEEPSEEK: "DeepSeek (нужен ключ)",
+            LlmProvider.OLLAMA: "Ollama локально (без ключа)",
+            LlmProvider.CUSTOM: "Свой эндпоинт (OpenAI-совместимый)",
+        }[self]
+
+
+# Пресеты провайдеров: url, модель по умолчанию, нужен ли ключ
+PROVIDER_PRESETS: dict[LlmProvider, dict[str, object]] = {
+    LlmProvider.POLLINATIONS: {
+        "url": "https://text.pollinations.ai/openai",
+        "model": "openai-fast",
+        "needs_key": False,
+    },
+    LlmProvider.OPENAI: {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "model": "gpt-4o-mini",
+        "needs_key": True,
+    },
+    LlmProvider.OPENROUTER: {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "openai/gpt-4o-mini",
+        "needs_key": True,
+    },
+    LlmProvider.DEEPSEEK: {
+        "url": "https://api.deepseek.com/chat/completions",
+        "model": "deepseek-chat",
+        "needs_key": True,
+    },
+    LlmProvider.OLLAMA: {
+        "url": "http://localhost:11434/v1/chat/completions",
+        "model": "llama3.1:8b",
+        "needs_key": False,
+    },
+    LlmProvider.CUSTOM: {
+        "url": "",
+        "model": "",
+        "needs_key": True,
+    },
+}
+
+
+def mask_key(key: str) -> str:
+    """Замаскировать ключ для логов/GUI: 'sk-...abcd' (никогда не показывать целиком)."""
+    if not key:
+        return "(не задан)"
+    k = key.strip()
+    if len(k) <= 8:
+        return "***"
+    return f"{k[:3]}...{k[-4:]}"
+
+
+def is_localhost_url(url: str) -> bool:
+    """Проверить, что URL указывает на localhost (ключ туда не отправляем)."""
+    u = (url or "").lower()
+    return "localhost" in u or "127.0.0.1" in u or "[::1]" in u
+
+
+def settings_dir() -> Path:
+    """Папка пользовательских настроек (~/.universum)."""
+    return Path.home() / ".universum"
+
+
+@dataclass
+class LlmSettings:
+    """Настройки нейросети, сохраняемые пользователем (GUI)."""
+
+    provider: LlmProvider = LlmProvider.POLLINATIONS
+    url: str = ""
+    model: str = ""
+    api_key: str = ""
+
+    def resolved_url(self) -> str:
+        """URL с учётом пресета провайдера."""
+        if self.url.strip():
+            return self.url.strip()
+        preset = PROVIDER_PRESETS.get(self.provider, {})
+        return str(preset.get("url", ""))
+
+    def resolved_model(self) -> str:
+        """Модель с учётом пресета провайдера."""
+        if self.model.strip():
+            return self.model.strip()
+        preset = PROVIDER_PRESETS.get(self.provider, {})
+        return str(preset.get("model", ""))
+
+    def __repr__(self) -> str:  # ключ никогда не попадает в repr/логи
+        return f"LlmSettings(provider={self.provider.value}, url={self.resolved_url()!r}, model={self.resolved_model()!r}, api_key={mask_key(self.api_key)})"
+
+
+def load_llm_settings() -> LlmSettings:
+    """Загрузить настройки: env > keyring > файл ~/.universum/settings.json > по умолчанию."""
+    # 1. Переменные окружения имеют наивысший приоритет
+    env_url = os.getenv("UNIVERSUM_LLM_URL", "").strip()
+    env_model = os.getenv("UNIVERSUM_LLM_MODEL", "").strip()
+    env_key = os.getenv("UNIVERSUM_LLM_KEY", "").strip()
+    if env_url or env_model or env_key:
+        provider = LlmProvider.CUSTOM if env_url else LlmProvider.POLLINATIONS
+        return LlmSettings(provider=provider, url=env_url, model=env_model, api_key=env_key)
+    # 2. OS keyring (если установлен пакет keyring)
+    try:
+        import keyring  # type: ignore
+
+        key = keyring.get_password("universum", "llm_api_key") or ""
+        if key:
+            # URL/модель берём из файла, ключ — из keyring
+            file_settings = _load_settings_file()
+            file_settings.api_key = key
+            return file_settings
+    except Exception:
+        pass
+    # 3. Файл настроек
+    return _load_settings_file()
+
+
+def _load_settings_file() -> LlmSettings:
+    """Прочитать ~/.universum/settings.json (без ключа, если он в keyring)."""
+    import json
+
+    path = settings_dir() / "settings.json"
+    if not path.exists():
+        return LlmSettings()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        provider = LlmProvider(data.get("provider", "pollinations"))
+        return LlmSettings(
+            provider=provider,
+            url=str(data.get("url", "")),
+            model=str(data.get("model", "")),
+            api_key=str(data.get("api_key", "")),
+        )
+    except Exception:
+        return LlmSettings()
+
+
+def save_llm_settings(settings: LlmSettings) -> None:
+    """Сохранить настройки. Ключ — в keyring (если доступен), иначе в файл с правами 0600.
+
+    Args:
+        settings: Настройки для сохранения.
+    """
+    import json
+
+    settings_dir().mkdir(parents=True, exist_ok=True)
+    path = settings_dir() / "settings.json"
+    saved_key = ""
+    # Пробуем keyring
+    key_saved_to_keyring = False
+    if settings.api_key.strip():
+        try:
+            import keyring  # type: ignore
+
+            keyring.set_password("universum", "llm_api_key", settings.api_key.strip())
+            key_saved_to_keyring = True
+        except Exception:
+            key_saved_to_keyring = False
+    if not key_saved_to_keyring:
+        saved_key = settings.api_key.strip()
+    data = {
+        "provider": settings.provider.value,
+        "url": settings.url.strip(),
+        "model": settings.model.strip(),
+        "api_key": saved_key,
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Ограничить права (на Windows — best effort)
+    try:
+        path.chmod(0o600)
+    except Exception:
+        pass
+
+
 @dataclass(frozen=True)
 class LlmConfig:
-    """Настройки LLM-клиента (OpenAI-совместимый API, без ключа по умолчанию)."""
+    """Настройки LLM-клиента (OpenAI-совместимый API)."""
 
-    # Основной эндпоинт: Pollinations.ai — бесплатный, без ключа, OpenAI-совместимый.
-    # Документация: https://github.com/pollinations/pollinations/blob/main/APIDOCS.md
     primary_url: str = "https://text.pollinations.ai/openai"
-    # Локальный Ollama как fallback (если пользователь его запустил).
     ollama_url: str = "http://localhost:11434/v1/chat/completions"
     ollama_model: str = "llama3.1:8b"
     model: str = field(default_factory=lambda: os.getenv("UNIVERSUM_LLM_MODEL", "openai-fast"))
     api_key: str = field(default_factory=lambda: os.getenv("UNIVERSUM_LLM_KEY", ""))
     custom_url: str = field(default_factory=lambda: os.getenv("UNIVERSUM_LLM_URL", ""))
+    provider: LlmProvider = LlmProvider.POLLINATIONS
     timeout_sec: int = 180
     max_retries: int = 3
     retry_backoff_sec: float = 2.0
     max_tokens: int = 8192
     temperature: float = 0.7
 
+    @classmethod
+    def from_settings(cls, settings: LlmSettings) -> "LlmConfig":
+        """Создать конфиг из пользовательских настроек (GUI)."""
+        url = settings.resolved_url()
+        model = settings.resolved_model()
+        # Если провайдер Pollinations/Ollama — это primary, иначе custom
+        if settings.provider in (LlmProvider.POLLINATIONS, LlmProvider.OLLAMA):
+            return cls(
+                primary_url=url or "https://text.pollinations.ai/openai",
+                model=model or "openai-fast",
+                api_key=settings.api_key.strip(),
+                provider=settings.provider,
+            )
+        return cls(
+            primary_url="https://text.pollinations.ai/openai",
+            custom_url=url,
+            model=model,
+            api_key=settings.api_key.strip(),
+            provider=settings.provider,
+        )
+
     @property
-    def endpoints(self) -> list[tuple[str, str]]:
-        """Цепочка эндпоинтов (url, model) в порядке приоритета."""
-        chain: list[tuple[str, str]] = []
+    def endpoints(self) -> list[tuple[str, str, bool]]:
+        """Цепочка эндпоинтов (url, model, send_key) в порядке приоритета.
+
+        send_key=True только для удалённых эндпоинтов с ключом (не для localhost).
+        """
+        chain: list[tuple[str, str, bool]] = []
+        has_key = bool(self.api_key.strip())
         if self.custom_url:
-            chain.append((self.custom_url, self.model))
-        chain.append((self.primary_url, self.model))
-        chain.append((self.ollama_url, self.ollama_model))
+            chain.append((self.custom_url, self.model, has_key and not is_localhost_url(self.custom_url)))
+        # Primary: ключ шлём только если провайдер требует и это не localhost
+        primary_send_key = has_key and self.provider not in (LlmProvider.POLLINATIONS, LlmProvider.OLLAMA) and not is_localhost_url(self.primary_url)
+        # Если primary — Pollinations без ключа, ключ не нужен
+        if self.provider == LlmProvider.POLLINATIONS:
+            primary_send_key = False
+        chain.append((self.primary_url, self.model, primary_send_key))
+        # Ollama всегда без ключа
+        chain.append((self.ollama_url, self.ollama_model, False))
         return chain
 
 
