@@ -1,0 +1,276 @@
+% !TEX program = pdflatex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{iftex}
+\ifPDFTeX
+  % pdflatex: 8-битные шрифты, кириллица через T2A + Latin Modern
+  \usepackage[T2A]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{lmodern}
+\else
+  % xelatex/lualatex (в т.ч. Tectonic): Unicode-шрифты
+  \usepackage{fontspec}
+\fi
+\usepackage[english,russian]{babel}
+\usepackage[margin=2.2cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}   % \toprule/\midrule/\bottomrule
+\usepackage{tabularx}   % таблицы с переносом текста
+\usepackage{listings}   % листинги кода (не minted: не нужен shell-escape)
+\usepackage[table,dvipsnames]{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+% современный sans-serif: Latin Modern Sans (в отличие от helvet содержит кириллицу)
+\renewcommand{\familydefault}{\sfdefault}
+
+% ---------- палитра ----------
+\definecolor{primary}{HTML}{2E3192}
+\definecolor{secondary}{HTML}{F15A24}
+\definecolor{accent}{HTML}{00B4A6}
+\definecolor{soft}{HTML}{F4F6FB}
+\definecolor{highlight}{HTML}{FFD166}
+\definecolor{textgray}{HTML}{3A3A3A}
+
+% ---------- листинги кода ----------
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  tabsize=4,
+  showstringspaces=false,
+  extendedchars=true,
+  inputencoding=utf8
+}
+
+% ---------- вспомогательные команды ----------
+\newcommand{\term}[1]{\textcolor{primary}{\textbf{#1}}}
+\newcommand{\hl}[1]{\colorbox{highlight!60}{#1}}
+
+
+% ---------- иконки (если пакет есть) ----------
+\newif\ifuniversumicons
+\IfFileExists{fontawesome5.sty}{\universumiconstrue}{\universumiconsfalse}
+\ifuniversumicons
+  \usepackage{fontawesome5}
+  \newcommand{\iconBulb}{\faLightbulb\enspace}
+  \newcommand{\iconBook}{\faBookOpen\enspace}
+  \newcommand{\iconFlask}{\faFlask\enspace}
+  \newcommand{\iconWarn}{\faExclamationTriangle\enspace}
+  \newcommand{\iconRight}{\faChevronRight}
+  \newcommand{\iconGrad}{\faGraduationCap}
+  \newcommand{\iconUser}{\faUserGraduate\ }
+  \newcommand{\iconCal}{\faCalendarAlt\ }
+\else
+  \newcommand{\iconBulb}{}\newcommand{\iconBook}{}\newcommand{\iconFlask}{}
+  \newcommand{\iconWarn}{}\newcommand{\iconRight}{$\triangleright$}
+  \newcommand{\iconGrad}{}\newcommand{\iconUser}{}\newcommand{\iconCal}{}
+\fi
+
+
+% ============================================================
+%   БЛОКИ без tcolorbox (минимальное оформление)
+% ============================================================
+\newcommand{\universumplainboxes}{%
+  \newenvironment{definition}[1][]{\par\medskip\noindent\textbf{Определение.}\ \itshape}{\par\medskip}%
+  \newenvironment{theorem}[1][]{\par\medskip\noindent\textbf{Теорема.}\ \itshape}{\par\medskip}%
+  \newenvironment{example}[1][]{\par\medskip\noindent\textbf{Пример.}\ \normalfont}{\par\medskip}%
+  \newenvironment{important}[1][]{\par\medskip\noindent\textbf{Важно.}\ \normalfont}{\par\medskip}%
+  \newenvironment{keyidea}[1][]{\par\medskip\noindent\itshape}{\par\medskip}%
+}
+
+
+% ============================================================
+%   КРАСИВЫЕ БЛОКИ (tcolorbox) + запасной вариант без tcolorbox
+% ============================================================
+\newif\ifuniversumfancy
+\IfFileExists{tcolorbox.sty}{\universumfancytrue}{\universumfancyfalse}
+\ifuniversumfancy
+  \usepackage[most]{tcolorbox}
+  \tcbset{
+    lecbox/.style={
+      enhanced, breakable,
+      colback=soft, colframe=primary, coltitle=white,
+      fonttitle=\bfseries\sffamily,
+      boxrule=0pt, leftrule=4pt,
+      arc=4pt, outer arc=4pt,
+      left=10pt, right=10pt, top=8pt, bottom=8pt,
+      attach boxed title to top left={xshift=8pt, yshift=-10pt},
+      boxed title style={colback=primary, sharp corners, boxrule=0pt, arc=2pt,
+        left=6pt, right=6pt, top=3pt, bottom=3pt},
+      top=16pt
+    }
+  }
+  \newtcolorbox{definition}[1][]{lecbox, title={\iconBulb Определение},
+    colframe=accent, boxed title style={colback=accent}, #1}
+  \newtcolorbox{theorem}[1][]{lecbox, title={\iconBook Теорема}, #1}
+  \newtcolorbox{example}[1][]{lecbox, title={\iconFlask Пример},
+    colframe=secondary, boxed title style={colback=secondary}, #1}
+  \newtcolorbox{important}[1][]{lecbox, title={\iconWarn Важно},
+    colframe=secondary, boxed title style={colback=secondary},
+    colback=highlight!25, #1}
+  \newtcolorbox{keyidea}[1][]{enhanced, colback=primary!8, colframe=primary,
+    boxrule=1.5pt, arc=8pt, left=12pt, right=12pt, top=10pt, bottom=10pt,
+    fontupper=\itshape, borderline west={4pt}{0pt}{secondary}, #1}
+\else
+  \universumplainboxes
+\fi
+
+
+% ============================================================
+%   ТИТУЛЬНЫЙ ЛИСТ: \makelecturetitle{Курс}{Семестр}{Лекция}{Тема}
+% ============================================================
+\newif\ifuniversumtikz
+\IfFileExists{tikz.sty}{\universumtikztrue}{\universumtikzfalse}
+\ifuniversumtikz
+  \newcommand{\makelecturetitle}[4]{%
+  \begin{titlepage}
+  \centering
+  \begin{tikzpicture}[remember picture, overlay]
+    \fill[primary] (current page.north west) rectangle
+      ([yshift=-5cm]current page.north east);
+    \fill[secondary] ([yshift=-5cm]current page.north west) rectangle
+      ([yshift=-5.3cm]current page.north east);
+    \fill[accent] ([yshift=-5.3cm]current page.north west) rectangle
+      ([yshift=-5.45cm]current page.north east);
+    \fill[white, opacity=0.08]
+      ([xshift=2cm, yshift=-2cm]current page.north east) circle (4cm);
+    \fill[white, opacity=0.06]
+      ([xshift=14cm, yshift=-4cm]current page.north west) circle (2.5cm);
+  \end{tikzpicture}
+  \vspace*{0.5cm}
+  {\color{white}\Huge\bfseries\sffamily #1\par}
+  \vspace{0.3cm}
+  {\color{white}\Large\sffamily #2\par}
+  \vspace*{4cm}
+  {\color{primary}\Huge\bfseries #3\par}
+  \vspace{0.5cm}
+  {\color{secondary}\Large\sffamily #4\par}
+  \vfill
+  {\color{textgray}\large\iconUser Лектор: \textbf{Фамилия И.О.}\par}
+  \vspace{0.3cm}
+  {\color{textgray}\large\iconCal \today\par}
+  \vspace{1cm}
+  \end{titlepage}
+  }
+\else
+  \newcommand{\makelecturetitle}[4]{%
+  \begin{titlepage}
+  \centering
+  {\color{primary}\rule{\linewidth}{3pt}}\par
+  \vspace{1.2cm}
+  {\Huge\bfseries\sffamily #1\par}
+  \vspace{0.4cm}
+  {\Large\sffamily #2\par}
+  \vspace{2.5cm}
+  {\color{primary}\Huge\bfseries #3\par}
+  \vspace{0.5cm}
+  {\color{secondary}\Large\sffamily #4\par}
+  \vfill
+  {\large \today\par}
+  \vspace{1cm}
+  \end{titlepage}
+  }
+\fi
+
+
+% ---------- заголовки ----------
+\titleformat{\section}
+  {\Large\bfseries\sffamily\color{primary}}
+  {\thesection.}{0.6em}{}
+  [\vspace{-0.4em}{\color{secondary}\rule{\linewidth}{1.2pt}}]
+\titleformat{\subsection}
+  {\large\bfseries\sffamily\color{primary}}
+  {\color{secondary}\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\sffamily\color{accent}}
+  {\thesubsubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.6em}{0.9em}
+\titlespacing*{\subsection}{0pt}{1.2em}{0.5em}
+
+% ---------- списки ----------
+\setlist[itemize]{label={\color{secondary}\iconRight}, leftmargin=1.4em, itemsep=2pt}
+\setlist[enumerate]{label={\color{primary}\bfseries\arabic*.}, leftmargin=1.6em, itemsep=2pt}
+
+
+% ---------- колонтитулы ----------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\fancyhead[L]{\footnotesize\color{primary}\iconGrad\ \textbf{Учебный материал}}
+\fancyhead[R]{\footnotesize\color{primary}\thepage}
+\fancyfoot[C]{\footnotesize\color{textgray}\textit{Universum}}
+
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=primary,
+  urlcolor=secondary,
+  citecolor=accent
+}
+
+\begin{document}
+
+\makelecturetitle
+  {Дискретная математика}
+  {1 семестр / Модуль 1}
+  {Лекция 1}
+  {Множества и мощность: введение в тему}
+
+\section{Введение}
+
+Добро пожаловать на лекцию! Здесь мы рассмотрим \term{ключевые понятия},
+которые станут основой дальнейшего изучения материала.
+
+\begin{keyidea}
+Главная мысль лекции: \textbf{форма следует за функцией} — стиль и структура
+материала должны помогать усвоению, а не отвлекать.
+\end{keyidea}
+
+\section{Основные определения}
+
+\begin{definition}
+\term{Определение.} Пусть $X$ — множество. Тогда \emph{мощностью}
+множества $|X|$ называется количество его элементов.
+\end{definition}
+
+\begin{theorem}
+Для любых множеств $A$ и $B$ выполняется:
+\[
+  |A \cup B| = |A| + |B| - |A \cap B|.
+\]
+\end{theorem}
+
+\begin{example}
+Пусть $A = \{1,2,3\}$ и $B = \{3,4\}$. Тогда:
+\[
+  |A \cup B| = 4 = 3 + 2 - 1.
+\]
+\end{example}
+
+\begin{important}
+Не путайте \hl{мощность} с количеством \emph{подмножеств} — это разные
+характеристики множества!
+\end{important}
+
+\section{Примеры и задачи}
+
+\begin{enumerate}
+  \item Найдите мощность множества $\{x \in \mathbb{N} \mid x < 10\}$.
+  \item Докажите формулу включений-исключений для трёх множеств.
+  \item Приведите практический пример из вашей предметной области.
+\end{enumerate}
+
+\section{Выводы}
+
+\begin{keyidea}
+Мы освоили базовые определения и научились применять их на практике.
+На следующей лекции перейдём к более сложным конструкциям.
+\end{keyidea}
+
+\end{document}

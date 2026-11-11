@@ -86,7 +86,119 @@ def extract_latex(raw: str) -> str:
     end_idx = text.find(r"\end{document}")
     if end_idx != -1:
         text = text[: end_idx + len(r"\end{document}")]
-    return text.strip()
+    # Убрать @-макросы ядра (частая причина падения Tectonic)
+    return sanitize_latex(text.strip())
+
+
+_MAKEATLETTER_BLOCK_RE = re.compile(r"\\makeatletter.*?\\makeatother", re.DOTALL)
+_MAKEATLETTER_RE = re.compile(r"\\(?:makeatletter|makeatother)\b")
+_AT_MACRO_RE = re.compile(r"\\@+")
+_SPACEFACTOR_RE = re.compile(r"\\spacefactor\s*\d*")
+# \@title / \@author / \@date: подменяем значением из преамбулы, чтобы не
+# оставлять в тексте «голое» слово title/author/date
+_AT_FIELD_RE = re.compile(r"\\@(title|author|date)\b")
+_FIELD_RE = {
+    "title": re.compile(r"\\title\s*\{([^{}]*)\}"),
+    "author": re.compile(r"\\author\s*\{([^{}]*)\}"),
+    "date": re.compile(r"\\date\s*\{([^{}]*)\}"),
+}
+
+
+def sanitize_latex(code: str) -> str:
+    """Убрать внутренние макросы LaTeX (@-команды), ломающие компиляцию.
+
+    Модель иногда использует внутренние макросы ядра (``\\@``, ``\\@title``,
+    ``\\makeatletter``), из-за чего Tectonic падает с
+    ``You can't use \\spacefactor in internal vertical mode``. Промт это
+    запрещает, но здесь мы гарантируем результат: такие конструкции
+    вырезаются до компиляции.
+
+    Args:
+        code: LaTeX-код (может быть None/пустым).
+
+    Returns:
+        Очищенный LaTeX-код (всегда строка).
+    """
+    text = "" if code is None else str(code)
+    if not text:
+        return ""
+    original = text
+    removed = 0
+    # 0. \@title / \@author / \@date -> значение из преамбулы (или пусто),
+    #    иначе после вырезания "\@" остаётся «голое» слово title/author/date.
+    fields = {name: (m.group(1) if (m := rx.search(text)) else "") for name, rx in _FIELD_RE.items()}
+    text, n = _AT_FIELD_RE.subn(lambda m: fields.get(m.group(1), ""), text)
+    removed += n
+    # 1. Блоки \makeatletter ... \makeatother целиком (внутри — @-команды)
+    text, n = _MAKEATLETTER_BLOCK_RE.subn("", text)
+    removed += n
+    # 2. Одиночные \makeatletter / \makeatother
+    text, n = _MAKEATLETTER_RE.subn("", text)
+    removed += n
+    # 3. Сами @-команды: \@, \@@ (в т.ч. \@title -> остаётся текст "title")
+    text, n = _AT_MACRO_RE.subn("", text)
+    removed += n
+    # 4. \spacefactor (источник «You can't use \spacefactor…»)
+    text, n = _SPACEFACTOR_RE.subn("", text)
+    removed += n
+    if removed and text != original:
+        try:
+            get_logger().warning("Removed %d internal @-macro construct(s) from LaTeX", removed)
+        except Exception:  # pragma: no cover — логирование не должно ломать генерацию
+            pass
+    return text
+
+
+def extract_document_body(raw: str) -> str:
+    """Извлечь ТЕЛО LaTeX-документа из ответа нейросети.
+
+    Модель должна вернуть только содержимое между ``\\begin{document}`` и
+    ``\\end{document}`` (преамбула задаётся приложением). Но она иногда
+    возвращает полный документ или markdown-обёртку — здесь всё приводится
+    к телу: снимаются ```-блоки, отрезается преамбула и ``\\end{document}``,
+    убирается магическая строка ``% !TEX``.
+
+    Args:
+        raw: Сырой ответ LLM (может быть None/пустым).
+
+    Returns:
+        Тело документа (может быть пустым, если ничего не найдено).
+    """
+    text = "" if raw is None else str(raw)
+    if not text.strip():
+        return ""
+    # markdown-обёртки ```latex ... ```
+    fences = _FENCE_RE.findall(text)
+    candidates = [f.strip() for f in fences if f.strip()]
+    if candidates:
+        # Предпочитаем блок с \begin{document} или \makelecturetitle
+        for c in candidates:
+            if r"\begin{document}" in c or r"\makelecturetitle" in c:
+                text = c
+                break
+        else:
+            text = max(candidates, key=len)
+    # Отрезать преамбулу
+    begin = text.find(r"\begin{document}")
+    if begin != -1:
+        text = text[begin + len(r"\begin{document}"):]
+    # Отрезать \end{document} и всё после
+    end = text.find(r"\end{document}")
+    if end != -1:
+        text = text[:end]
+    # Убрать магическую строку и \documentclass/\usepackage, если модель их всё же вставила
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("% !TEX"):
+            continue
+        if stripped.startswith(r"\documentclass") or stripped.startswith(r"\usepackage"):
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+    # Убрать осиротевшие \begin{document}/\end{document} (двойные обёртки)
+    text = text.replace(r"\end{document}", "").replace(r"\begin{document}", "")
+    return sanitize_latex(text.strip())
 
 
 def validate_latex(code: str) -> list[str]:
@@ -120,11 +232,15 @@ def validate_latex(code: str) -> list[str]:
             if cb[env] != ce[env]:
                 problems.append(f"Несбалансированное окружение '{env}': begin={cb[env]}, end={ce[env]}.")
     # Запрещённые пакеты (ломают компиляцию без shell-escape / внешних файлов)
-    for pkg in ("minted", "tikz", "pgf", "biblatex", "biber", "glossaries", "cleveref", "siunitx"):
+    # tikz/tcolorbox/fontawesome5 разрешены: они уже подключены в преамбуле шаблона
+    for pkg in ("minted", "biblatex", "biber", "glossaries", "cleveref", "siunitx"):
         if re.search(rf"\\usepackage(\[[^\]]*\])?\{{[^}}]*\b{pkg}\b", code):
             problems.append(f"Запрещённый пакет '{pkg}' — удалите его (см. правила промта).")
     if r"\includegraphics" in code:
         problems.append("\\includegraphics без внешних файлов сломает компиляцию — удалите.")
+    # Внутренние макросы ядра: «You can't use \spacefactor in internal vertical mode»
+    if _AT_MACRO_RE.search(code) or _MAKEATLETTER_RE.search(code):
+        problems.append("Внутренние @-макросы (\\@, \\makeatletter) ломают компиляцию — удалите их.")
     return problems
 
 

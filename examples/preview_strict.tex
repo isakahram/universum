@@ -1,0 +1,217 @@
+% !TEX program = pdflatex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{iftex}
+\ifPDFTeX
+  % pdflatex: 8-битные шрифты, кириллица через T2A + Latin Modern
+  \usepackage[T2A]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{lmodern}
+\else
+  % xelatex/lualatex (в т.ч. Tectonic): Unicode-шрифты
+  \usepackage{fontspec}
+\fi
+\usepackage[english,russian]{babel}
+\usepackage[margin=2.2cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}   % \toprule/\midrule/\bottomrule
+\usepackage{tabularx}   % таблицы с переносом текста
+\usepackage{listings}   % листинги кода (не minted: не нужен shell-escape)
+\usepackage[table,dvipsnames]{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+% современный sans-serif: Latin Modern Sans (в отличие от helvet содержит кириллицу)
+\renewcommand{\familydefault}{\sfdefault}
+
+% ---------- палитра ----------
+\definecolor{primary}{HTML}{000000}
+\definecolor{secondary}{HTML}{333333}
+\definecolor{accent}{HTML}{555555}
+\definecolor{soft}{HTML}{F7F7F7}
+\definecolor{highlight}{HTML}{E6E6E6}
+\definecolor{textgray}{HTML}{333333}
+
+% ---------- листинги кода ----------
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  tabsize=4,
+  showstringspaces=false,
+  extendedchars=true,
+  inputencoding=utf8
+}
+
+% ---------- вспомогательные команды ----------
+\newcommand{\term}[1]{\textcolor{primary}{\textbf{#1}}}
+\newcommand{\hl}[1]{\colorbox{highlight!60}{#1}}
+
+
+% ---------- иконки отключены ----------
+\newcommand{\iconBulb}{}
+\newcommand{\iconBook}{}
+\newcommand{\iconFlask}{}
+\newcommand{\iconWarn}{}
+\newcommand{\iconRight}{$\triangleright$}
+\newcommand{\iconGrad}{}
+\newcommand{\iconUser}{}
+\newcommand{\iconCal}{}
+
+
+% ============================================================
+%   БЛОКИ без tcolorbox (минимальное оформление)
+% ============================================================
+\newcommand{\universumplainboxes}{%
+  \newenvironment{definition}[1][]{\par\medskip\noindent\textbf{Определение.}\ \itshape}{\par\medskip}%
+  \newenvironment{theorem}[1][]{\par\medskip\noindent\textbf{Теорема.}\ \itshape}{\par\medskip}%
+  \newenvironment{example}[1][]{\par\medskip\noindent\textbf{Пример.}\ \normalfont}{\par\medskip}%
+  \newenvironment{important}[1][]{\par\medskip\noindent\textbf{Важно.}\ \normalfont}{\par\medskip}%
+  \newenvironment{keyidea}[1][]{\par\medskip\noindent\itshape}{\par\medskip}%
+}
+
+
+% ============================================================
+%   БЛОКИ (tcolorbox, монохром) + запасной вариант без tcolorbox
+% ============================================================
+\newif\ifuniversumfancy
+\IfFileExists{tcolorbox.sty}{\universumfancytrue}{\universumfancyfalse}
+\ifuniversumfancy
+  \usepackage[most]{tcolorbox}
+  \tcbset{
+    lecbox/.style={
+      breakable, enhanced,
+      colback=white, colframe=primary!70, coltitle=black,
+      fonttitle=\bfseries\sffamily,
+      boxrule=0.6pt, arc=0pt, outer arc=0pt,
+      left=8pt, right=8pt, top=6pt, bottom=6pt
+    }
+  }
+  \newtcolorbox{definition}[1][]{lecbox, title={Определение}, #1}
+  \newtcolorbox{theorem}[1][]{lecbox, title={Теорема}, #1}
+  \newtcolorbox{example}[1][]{lecbox, title={Пример}, #1}
+  \newtcolorbox{important}[1][]{lecbox, title={Важно}, colback=soft, #1}
+  \newtcolorbox{keyidea}[1][]{lecbox, title={Ключевая мысль}, #1}
+\else
+  \universumplainboxes
+\fi
+
+
+% ============================================================
+%   ТИТУЛЬНЫЙ ЛИСТ: \makelecturetitle{Курс}{Семестр}{Лекция}{Тема}
+% ============================================================
+\newcommand{\makelecturetitle}[4]{%
+\begin{titlepage}
+\centering
+{\color{primary}\rule{\linewidth}{2pt}}\par
+\vspace{1.5cm}
+{\Huge\bfseries\sffamily #3\par}
+\vspace{0.6cm}
+{\Large\sffamily #4\par}
+\vspace{2.5cm}
+{\Large #1\par}
+\vspace{0.3cm}
+{\large #2\par}
+\vspace{0.5cm}
+{\large \today\par}
+\vfill
+{\color{primary}\rule{\linewidth}{0.6pt}}
+\end{titlepage}
+}
+
+
+% ---------- заголовки ----------
+\titleformat{\section}
+  {\Large\bfseries\sffamily}
+  {\thesection.}{0.6em}{}
+  [\vspace{-0.4em}{\color{primary!60}\rule{\linewidth}{0.6pt}}]
+\titleformat{\subsection}{\large\bfseries\sffamily}{\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\sffamily}{\thesubsubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.5em}{0.8em}
+\titlespacing*{\subsection}{0pt}{1.1em}{0.5em}
+
+% ---------- списки ----------
+\setlist[itemize]{leftmargin=1.4em, itemsep=2pt}
+\setlist[enumerate]{leftmargin=1.6em, itemsep=2pt}
+
+
+% ---------- колонтитулы ----------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\footnotesize Учебный материал}
+\fancyhead[R]{\footnotesize\thepage}
+
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=primary,
+  urlcolor=secondary,
+  citecolor=accent
+}
+
+\begin{document}
+
+\makelecturetitle
+  {Дискретная математика}
+  {1 семестр / Модуль 1}
+  {Лекция 1}
+  {Множества и мощность: введение в тему}
+
+\section{Введение}
+
+Добро пожаловать на лекцию! Здесь мы рассмотрим \term{ключевые понятия},
+которые станут основой дальнейшего изучения материала.
+
+\begin{keyidea}
+Главная мысль лекции: \textbf{форма следует за функцией} — стиль и структура
+материала должны помогать усвоению, а не отвлекать.
+\end{keyidea}
+
+\section{Основные определения}
+
+\begin{definition}
+\term{Определение.} Пусть $X$ — множество. Тогда \emph{мощностью}
+множества $|X|$ называется количество его элементов.
+\end{definition}
+
+\begin{theorem}
+Для любых множеств $A$ и $B$ выполняется:
+\[
+  |A \cup B| = |A| + |B| - |A \cap B|.
+\]
+\end{theorem}
+
+\begin{example}
+Пусть $A = \{1,2,3\}$ и $B = \{3,4\}$. Тогда:
+\[
+  |A \cup B| = 4 = 3 + 2 - 1.
+\]
+\end{example}
+
+\begin{important}
+Не путайте \hl{мощность} с количеством \emph{подмножеств} — это разные
+характеристики множества!
+\end{important}
+
+\section{Примеры и задачи}
+
+\begin{enumerate}
+  \item Найдите мощность множества $\{x \in \mathbb{N} \mid x < 10\}$.
+  \item Докажите формулу включений-исключений для трёх множеств.
+  \item Приведите практический пример из вашей предметной области.
+\end{enumerate}
+
+\section{Выводы}
+
+\begin{keyidea}
+Мы освоили базовые определения и научились применять их на практике.
+На следующей лекции перейдём к более сложным конструкциям.
+\end{keyidea}
+
+\end{document}

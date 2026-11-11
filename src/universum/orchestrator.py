@@ -15,8 +15,14 @@ from .config import AppConfig, DocType, Style, Volume, get_config
 from .file_parser import parse_file
 from .latex_compiler import compile_with_repair
 from .llm_client import LlmClient
-from .prompts import SYSTEM_PROMPT, PromptContext, build_generation_prompt, detect_language
-from .utils import UniversumError, extract_latex, get_logger, log_event, validate_latex
+from .prompts import (
+    SYSTEM_PROMPT,
+    PromptContext,
+    build_generation_prompt,
+    detect_language,
+    wrap_document,
+)
+from .utils import UniversumError, extract_document_body, get_logger, log_event, validate_latex
 from .web_search import web_search
 
 ProgressFn = Callable[[str], None]
@@ -151,12 +157,15 @@ class Orchestrator:
         _p("Генерация документа нейросетью…")
         _check_cancel()
         raw = self.llm.generate(SYSTEM_PROMPT, user_prompt, progress=_p, cancel_event=cancel_event)
-        latex_code = extract_latex(raw)
+        # Модель отдаёт только тело; преамбулу и оформление задаёт шаблон стиля,
+        # поэтому сломать пакеты/кодировку она не может.
+        body = extract_document_body(raw)
+        if not body:
+            raise UniversumError("Нейросеть не вернула LaTeX-код. Попробуйте ещё раз.")
+        latex_code = wrap_document(body, req.style, language=language)
         problems = validate_latex(latex_code)
         if problems:
             self.logger.warning("Generated LaTeX has issues: %s", problems)
-        if not latex_code:
-            raise UniversumError("Нейросеть не вернула LaTeX-код. Попробуйте ещё раз.")
 
         # 6. Компиляция с авто-ремонтом
         _p("Компиляция в PDF…")
@@ -171,6 +180,11 @@ class Orchestrator:
             config=self.config.latex,
             progress=_p,
             cancel_event=cancel_event,
+            # Ремонт возвращает тело — собираем документ заново с нашей преамбулой
+            postprocess=lambda fixed_raw: wrap_document(
+                extract_document_body(fixed_raw), req.style, language=language
+            ),
+            prompt_view=extract_document_body,
         )
         assert compiled.pdf_path is not None
         # Копируем PDF в стабильное место (tempdir может очиститься)

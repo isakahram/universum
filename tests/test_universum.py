@@ -263,11 +263,23 @@ def test_orchestrator_mocked(tmp_path, monkeypatch):
         log = ""
         engine = "fake"
 
-    monkeypatch.setattr(orch_mod, "compile_with_repair", lambda code, llm, config=None, progress=None, cancel_event=None: FakeResult())
+    captured: dict[str, str] = {}
+
+    def fake_compile(code, llm, config=None, progress=None, cancel_event=None, postprocess=None, prompt_view=None):
+        captured["code"] = code
+        captured["postprocess"] = "yes" if postprocess else "no"
+        return FakeResult()
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", fake_compile)
     req = GenerationRequest(request_text="Лекция по физике", doc_type=DocType.LECTURE, style=Style.STRICT, volume=Volume(pages=2))
     result = orch.generate(req)
     assert result.pdf_path.exists()
-    assert result.latex_code == SAMPLE_TEX.strip()
+    # Готовый документ = наша преамбула + тело от модели
+    assert captured["code"].startswith("% !TEX program = pdflatex")
+    assert r"\begin{document}" in captured["code"]
+    assert r"\section{Введение}" in captured["code"]
+    assert captured["postprocess"] == "yes"
+    assert result.latex_code.startswith("% !TEX program = pdflatex")
 
 
 # ---------------------------------------------------------------------------
@@ -461,3 +473,322 @@ def test_compile_with_repair_raises_with_string_log(monkeypatch):
     with pytest.raises(LatexCompileError) as exc:
         lc.compile_with_repair("x", lambda s, u: "y", config=Cfg())
     assert isinstance(exc.value.log, str) and exc.value.log
+
+
+# ---------------------------------------------------------------------------
+# Запрет внутренних @-макросов LaTeX (You can't use \spacefactor ...)
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_forbids_at_macros():
+    from universum.prompts import SYSTEM_PROMPT
+
+    assert r"\@" in SYSTEM_PROMPT
+    assert "makeatletter" in SYSTEM_PROMPT
+    assert "spacefactor" in SYSTEM_PROMPT
+    assert r"\makelecturetitle" in SYSTEM_PROMPT
+    assert "НИКОГДА" in SYSTEM_PROMPT
+
+
+def test_style_prompts_forbid_at_macros():
+    from universum.prompts import STYLE_BLOCKS
+
+    for style, block in STYLE_BLOCKS.items():
+        assert r"\@" in block, style
+        assert "makelecturetitle" in block, style
+
+
+def test_lecture_and_repair_prompt_mention_title_rules():
+    from universum.prompts import DOCTYPE_LECTURE, build_repair_prompt
+
+    assert r"\makelecturetitle" in DOCTYPE_LECTURE
+
+    repair = build_repair_prompt(r"\makelecturetitle{A}{B}{C}{D}", "! You can't use \\spacefactor in internal vertical mode")
+    assert "spacefactor" in repair
+    assert "makelecturetitle" in repair
+
+
+def test_sanitize_latex_removes_at_macros():
+    from universum.utils import sanitize_latex
+
+    code = (
+        "\\documentclass{article}\n"
+        "\\title{Тема}\\author{Автор}\\date{2026}\n"
+        "\\makeatletter\n"
+        "\\def\\@maketitle{\\hbox{\\@title}}\n"
+        "\\makeatother\n"
+        "\\begin{document}\n"
+        "{\\Large \\@title}\n"
+        "\\@author, \\@date\n"
+        "\\spacefactor1000\n"
+        "почта: user@example.com\n"
+        "\\end{document}"
+    )
+    clean = sanitize_latex(code)
+    assert r"\@" not in clean
+    assert "makeatletter" not in clean
+    assert "spacefactor" not in clean
+    # значения из преамбулы подставлены вместо \@title и т.п.
+    assert "Тема" in clean and "Автор" in clean and "2026" in clean
+    # обычный @ в тексте не тронут
+    assert "user@example.com" in clean
+
+
+def test_sanitize_latex_handles_none_and_plain():
+    from universum.utils import sanitize_latex
+
+    assert sanitize_latex("") == ""
+    assert sanitize_latex(None) == ""  # type: ignore[arg-type]
+    txt = "\\documentclass{article}\\begin{document}x\\end{document}"
+    assert sanitize_latex(txt) == txt
+
+
+def test_validate_flags_at_macros():
+    from universum.utils import validate_latex
+
+    problems = validate_latex("\\documentclass{article}\\begin{document}\\@title\\end{document}")
+    assert any("макрос" in p.lower() for p in problems)
+
+
+def test_extract_latex_sanitizes_at_macros():
+    from universum.utils import extract_latex
+
+    raw = "```latex\n\\documentclass{article}\n\\begin{document}\n\\maketitle\\@\\@title\n\\end{document}\n```"
+    out = extract_latex(raw)
+    assert r"\@" not in out
+    assert "\\begin{document}" in out
+
+
+def test_compile_latex_sanitizes_before_engine(monkeypatch):
+    """Даже если код пришёл в обход extract_latex, движок не увидит \\@."""
+    import universum.latex_compiler as lc
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(lc, "find_engine", lambda preference: "tectonic")
+
+    def fake_run(cmd, cwd=None, **kwargs):
+        from pathlib import Path
+
+        captured["tex"] = Path(cwd, "document.tex").read_text(encoding="utf-8")
+        p = lc.CompileResult  # noqa: F841 — просто для читаемости
+        raise RuntimeError("останавливаемся после чтения файла")
+
+    monkeypatch.setattr(lc, "subprocess", type("S", (), {"run": staticmethod(fake_run), "TimeoutExpired": Exception, "DEVNULL": -3}))
+    result = lc.compile_latex("\\documentclass{article}\\begin{document}\\@title\\end{document}")
+    assert r"\@" not in captured["tex"]
+    assert result.success is False
+    assert isinstance(result.log, str)
+
+
+def test_prompts_have_no_double_backslashes():
+    """В промтах не должно быть «\\\\@» / «\\\\title» — модели увидят лишнюю косую."""
+    from universum.prompts import DOCTYPE_BLOCKS, STYLE_BLOCKS, SYSTEM_PROMPT, REPAIR_PROMPT_TEMPLATE
+
+    texts = [SYSTEM_PROMPT, REPAIR_PROMPT_TEMPLATE, *STYLE_BLOCKS.values(), *DOCTYPE_BLOCKS.values()]
+    for text in texts:
+        assert "\\\\@" not in text
+        assert "\\\\maketitle" not in text
+        assert "\\\\title{" not in text
+
+
+# ---------------------------------------------------------------------------
+# LaTeX-шаблон: фиксированная преамбула, магическая строка, блоки
+# ---------------------------------------------------------------------------
+
+def test_magic_comment_is_first_line():
+    from universum.prompts import MAGIC_COMMENT, wrap_document
+
+    for style in Style:
+        doc = wrap_document("тело", style)
+        assert doc.splitlines()[0] == MAGIC_COMMENT == "% !TEX program = pdflatex"
+
+
+def test_wrap_document_has_template_features():
+    from universum.prompts import wrap_document
+
+    for style in Style:
+        doc = wrap_document(r"\makelecturetitle{К}{С}{Л}{Т}\section{X}", style)
+        assert doc.count(r"\begin{document}") == 1
+        assert doc.count(r"\end{document}") == 1
+        assert r"\makelecturetitle" in doc
+        # окружения-блоки доступны в любом стиле
+        for env in ("definition", "theorem", "example", "important", "keyidea"):
+            assert env in doc, (style, env)
+
+
+def test_preamble_is_engine_agnostic():
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style)
+        assert r"\usepackage{iftex}" in pre
+        assert r"\ifPDFTeX" in pre
+        assert r"\usepackage[T2A]{fontenc}" in pre      # pdflatex + кириллица
+        assert r"\usepackage{fontspec}" in pre           # xelatex/lualatex (Tectonic)
+        assert "fontawesome5" in pre or style != Style.COLORFUL
+        # кириллический sans вместо helvet (у helvet нет T2A-кириллицы)
+        assert r"\usepackage[scaled=0.92]{helvet}" not in pre
+        assert r"\familydefault}{\sfdefault}" in pre
+
+
+def test_preamble_language_order():
+    from universum.prompts import build_preamble
+
+    assert "english,russian" in build_preamble(Style.STRICT, "ru")
+    assert "russian,english" in build_preamble(Style.STRICT, "en")
+
+
+def test_preamble_braces_and_conditionals_balanced():
+    """Статическая проверка сгенерированного LaTeX (компилятора в тестах нет)."""
+    import re
+
+    from universum.prompts import wrap_document
+
+    for style in Style:
+        doc = wrap_document(r"\makelecturetitle{К}{С}{Л}{Т}", style)
+        txt = re.sub(r"(?<!\\)%.*", "", doc).replace(r"\{", "").replace(r"\}", "")
+        assert txt.count("{") == txt.count("}"), style
+        begins = re.findall(r"\\begin\{([^}]+)\}", txt)
+        ends = re.findall(r"\\end\{([^}]+)\}", txt)
+        assert sorted(begins) == sorted(ends), style
+        t2 = re.sub(r"\\newif\s*\\if[a-zA-Z@]+", "", txt)   # \newif объявляет, не открывает
+        assert len(re.findall(r"\\if[a-zA-Z@]+", t2)) == len(re.findall(r"\\fi(?![a-zA-Z])", t2)), style
+
+
+def test_system_prompt_requires_body_only():
+    from universum.prompts import SYSTEM_PROMPT
+
+    assert "ТОЛЬКО тело" in SYSTEM_PROMPT
+    assert r"ЗАПРЕЩЕНО писать \documentclass" in SYSTEM_PROMPT
+    assert r"\makelecturetitle" in SYSTEM_PROMPT
+    for env in ("definition", "theorem", "example", "important", "keyidea"):
+        assert env in SYSTEM_PROMPT
+    # запрет менять преамбулу и использовать внутренние макросы сохранён
+    assert "преамбул" in SYSTEM_PROMPT
+    assert r"\@," in SYSTEM_PROMPT and "makeatletter" in SYSTEM_PROMPT
+
+
+def test_generation_prompt_asks_for_body():
+    from universum.prompts import PromptContext, build_generation_prompt
+
+    prompt = build_generation_prompt(PromptContext(request_text="Тест темы"))
+    assert r"\makelecturetitle" in prompt
+    assert r"\documentclass" in prompt  # упоминается только как запрет
+    assert "ТОЛЬКО тело" in prompt
+
+
+def test_extract_document_body_strips_preamble_and_fences():
+    from universum.utils import extract_document_body
+
+    raw = "Вот:\n```latex\n% !TEX program = pdflatex\n\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\n\\makelecturetitle{A}{B}{C}{D}\n\\section{X}\n\\end{document}\n```"
+    body = extract_document_body(raw)
+    assert body.startswith(r"\makelecturetitle")
+    assert "documentclass" not in body and "usepackage" not in body
+    assert r"\begin{document}" not in body and r"\end{document}" not in body
+
+
+def test_extract_document_body_passthrough_body():
+    from universum.utils import extract_document_body
+
+    body = r"\makelecturetitle{A}{B}{C}{D}" + "\n" + r"\section{X}" + "\nТекст"
+    assert extract_document_body(body) == body
+    assert extract_document_body("") == ""
+    assert extract_document_body(None) == ""  # type: ignore[arg-type]
+
+
+def test_engine_from_magic():
+    from universum.latex_compiler import engine_from_magic
+
+    assert engine_from_magic("% !TEX program = pdflatex\n\\documentclass{article}") == "pdflatex"
+    assert engine_from_magic("% !TEX TS-program = xelatex") == "xelatex"
+    assert engine_from_magic("%!TEX program = lualatex") == "lualatex"
+    assert engine_from_magic("\\documentclass{article}") is None
+
+
+def test_magic_comment_prefers_installed_engine(monkeypatch):
+    """При магической строке pdflatex движок выбирается первым, если он есть."""
+    import universum.latex_compiler as lc
+
+    seen: dict[str, tuple] = {}
+
+    def fake_find(preference):
+        seen["preference"] = preference
+        return "pdflatex"
+
+    def fake_run(cmd, cwd=None, **kwargs):
+        from pathlib import Path
+
+        Path(cwd, "document.pdf").write_bytes(b"%PDF-1.4")
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(lc, "find_engine", fake_find)
+    monkeypatch.setattr(lc.subprocess, "run", fake_run)
+    monkeypatch.setattr(lc.shutil, "which", lambda name: "/usr/bin/pdflatex" if name == "pdflatex" else None)
+
+    result = lc.compile_latex("% !TEX program = pdflatex\n\\documentclass{article}\\begin{document}x\\end{document}")
+    assert result.success is True
+    assert seen["preference"][0] == "pdflatex"
+
+
+def test_compile_with_repair_postprocess(monkeypatch):
+    """Ремонт возвращает тело — postprocess собирает документ заново."""
+    import universum.latex_compiler as lc
+
+    calls: list[str] = []
+
+    def fake_compile(code, **kwargs):
+        calls.append(code)
+        if len(calls) == 1:
+            return lc.CompileResult(False, None, "! ошибка")
+        return lc.CompileResult(True, None, "")
+
+    monkeypatch.setattr(lc, "compile_latex", fake_compile)
+    out = lc.compile_with_repair(
+        "СТАРЫЙ ДОКУМЕНТ",
+        lambda s, u: "\\makelecturetitle{A}{B}{C}{D}",
+        config=type("C", (), {"max_repair_attempts": 1, "engine_preference": ()})(),
+        postprocess=lambda raw: "ПРЕАМБУЛА + " + raw,
+        prompt_view=lambda doc: doc.lower(),
+    )
+    assert out.success is True
+    assert calls[1].startswith("ПРЕАМБУЛА + ")
+
+
+def test_preamble_error_detection():
+    from universum.latex_compiler import is_preamble_error
+
+    assert is_preamble_error("! LaTeX Error: File `tcolorbox.sty' not found.")
+    assert is_preamble_error("File `fontawesome5.sty' not found")
+    assert not is_preamble_error("! You can't use \\spacefactor in internal vertical mode")
+    assert not is_preamble_error("")
+
+
+def test_preamble_error_skips_llm_repair(monkeypatch):
+    """Отсутствующий пакет не «лечим» тремя запросами к нейросети."""
+    import universum.latex_compiler as lc
+    from universum.utils import LatexCompileError
+
+    monkeypatch.setattr(lc, "compile_latex", lambda code, **kw: lc.CompileResult(False, None, "! LaTeX Error: File `tcolorbox.sty' not found."))
+    called = {"n": 0}
+
+    def llm(system, user):
+        called["n"] += 1
+        return "тело"
+
+    cfg = type("C", (), {"max_repair_attempts": 3, "engine_preference": ()})()
+    with pytest.raises(LatexCompileError) as exc:
+        lc.compile_with_repair("ДОК", llm, config=cfg)
+    assert called["n"] == 0
+    assert "tcolorbox" in str(exc.value)
+
+
+def test_preamble_loads_commands_allowed_by_prompt():
+    """Всё, что промт разрешает модели, должно быть подключено в преамбуле."""
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style)
+        for pkg in ("amsmath", "amssymb", "booktabs", "tabularx", "listings", "xcolor", "geometry", "hyperref", "enumitem", "babel"):
+            assert pkg in pre, (style, pkg)
+        assert r"\lstset" in pre
+        assert r"\newcommand{\term}" in pre
+        assert r"\newcommand{\hl}" in pre
