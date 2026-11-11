@@ -792,3 +792,67 @@ def test_preamble_loads_commands_allowed_by_prompt():
         assert r"\lstset" in pre
         assert r"\newcommand{\term}" in pre
         assert r"\newcommand{\hl}" in pre
+
+
+# ---------------------------------------------------------------------------
+# Кириллица: шрифты с T2A и иконки, которых может не быть
+# ---------------------------------------------------------------------------
+
+def test_preamble_uses_cyrillic_capable_fonts():
+    """lmsans/lmroman кириллицы не содержат — нужен tex-gyre (и fallback)."""
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style)
+        assert "tgheros" in pre                       # pdflatex: T2A-кириллица
+        assert "texgyreheros-regular.otf" in pre      # xelatex/lualatex/Tectonic
+        assert "texgyretermes-regular.otf" in pre
+        assert "cmunss.otf" in pre                    # fallback CMU
+        assert "DejaVuSans.ttf" in pre                # fallback DejaVu
+        assert "\\IfFontExistsTF" in pre
+        assert "\\familydefault}{\\sfdefault}" in pre
+
+
+def test_icons_are_guarded_against_missing_glyphs():
+    """\\faCalendarAlt есть не во всех версиях fontawesome5 -> не должно быть
+    «Undefined control sequence»."""
+    import re
+
+    from universum.prompts import build_preamble
+
+    pre = build_preamble(Style.COLORFUL)
+    assert r"\universumicon" in pre
+    assert r"\ifcsname faCalendarAlt\endcsname" in pre or r"\universumicon{faCalendarAlt}" in pre
+    # ни одна иконка не используется напрямую вне проверки
+    for line in pre.splitlines():
+        if re.search(r"\\fa[A-Z]", line) and not line.strip().startswith("%"):
+            assert "ifcsname" in line or "universumicon" in line, line
+
+
+def test_has_missing_cyrillic():
+    from universum.latex_compiler import has_missing_cyrillic
+
+    warn = 'Missing character: There is no М (U+041C) in font [lmsans10-bold]:mapping=tex-text;!'
+    assert not has_missing_cyrillic(warn)          # 1 предупреждение — ещё не повод падать
+    assert has_missing_cyrillic(warn * 6)          # массовая потеря кириллицы
+    assert not has_missing_cyrillic("! LaTeX Error: File `x.sty' not found")
+    assert not has_missing_cyrillic("Missing character: There is no é (U+00E9)")
+
+
+def test_cyrillic_error_is_not_repaired_by_llm(monkeypatch):
+    import universum.latex_compiler as lc
+    from universum.utils import LatexCompileError
+
+    log = 'Missing character: There is no М (U+041C) in font [lmsans10]:mapping=tex-text;!' * 6
+    monkeypatch.setattr(lc, "compile_latex", lambda code, **kw: lc.CompileResult(False, None, log))
+    called = {"n": 0}
+
+    def llm(system, user):
+        called["n"] += 1
+        return "тело"
+
+    cfg = type("C", (), {"max_repair_attempts": 3, "engine_preference": ()})()
+    with pytest.raises(LatexCompileError) as exc:
+        lc.compile_with_repair("ДОК", llm, config=cfg)
+    assert called["n"] == 0
+    assert "кириллиц" in str(exc.value)
