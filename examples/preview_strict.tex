@@ -3,41 +3,36 @@
 
 \usepackage{iftex}
 \ifPDFTeX
-  % pdflatex: 8-битные шрифты. T2A даёт кириллицу.
+  % pdflatex: 8-битные шрифты. T2A + Latin Modern дают кириллицу.
   \usepackage[T2A]{fontenc}
   \usepackage[utf8]{inputenc}
   \usepackage{lmodern}
-  % TeX Gyre Heros (Helvetica-подобный) содержит кириллицу в T2A.
-  % ВАЖНО: Latin Modern Sans (lmsans) кириллицы НЕ содержит — русский текст
-  % в нём превращается в пустые места, поэтому sans берём из tex-gyre.
-  \IfFileExists{tgheros.sty}{\usepackage{tgheros}}{\typeout{UNIVERSUM: tgheros not found}}
 \else
-  % xelatex/lualatex (в т.ч. Tectonic): Unicode-шрифты через fontspec.
+  % xelatex / lualatex / Tectonic: только стандартный fontspec и DejaVu.
+  % DejaVu гарантированно содержит кириллицу и есть в бандле TeX Live/Tectonic.
+  % Шрифт ищем по имени ФАЙЛА (kpse), а не по имени семейства: в Tectonic
+  % fontconfig может быть недоступен («Cannot load default config file»),
+  % поэтому \setmainfont{DejaVu Serif} по имени там не работает.
   \usepackage{fontspec}
-  % Latin Modern (lmroman/lmsans) кириллицы НЕ содержит -> берём шрифты с
-  % кириллицей, по имени файла (поиск через kpse, без fontconfig):
-  % TeX Gyre Heros/Termes -> CMU -> DejaVu -> предупреждение.
-  \IfFontExistsTF{texgyreheros-regular.otf}
-    {\setsansfont{texgyreheros}[Extension=.otf,
-        UprightFont=*-regular, BoldFont=*-bold,
-        ItalicFont=*-italic, BoldItalicFont=*-bolditalic]}
-    {\IfFontExistsTF{cmunss.otf}
-      {\setsansfont{CMU Sans Serif}}
-      {\IfFontExistsTF{DejaVuSans.ttf}
-        {\setsansfont{DejaVu Sans}}
-        {\typeout{UNIVERSUM: WARNING no Cyrillic-capable sans font (install tex-gyre)}}}}
-  \IfFontExistsTF{texgyretermes-regular.otf}
-    {\setmainfont{texgyretermes}[Extension=.otf,
-        UprightFont=*-regular, BoldFont=*-bold,
-        ItalicFont=*-italic, BoldItalicFont=*-bolditalic]}
-    {\IfFontExistsTF{cmunrm.otf}
-      {\setmainfont{CMU Serif}}
-      {\IfFontExistsTF{DejaVuSerif.ttf}{\setmainfont{DejaVu Serif}}{}}}
+  \IfFontExistsTF{DejaVuSerif.ttf}
+    {\setmainfont{DejaVuSerif.ttf}}
+    {\IfFontExistsTF{LiberationSerif-Regular.ttf}
+      {\setmainfont{LiberationSerif-Regular.ttf}}
+      {\typeout{UNIVERSUM: WARNING DejaVu Serif not found, Cyrillic may be missing}}}
+  \IfFontExistsTF{DejaVuSans.ttf}
+    {\setsansfont{DejaVuSans.ttf}}
+    {\IfFontExistsTF{LiberationSans-Regular.ttf}
+      {\setsansfont{LiberationSans-Regular.ttf}}
+      {\typeout{UNIVERSUM: WARNING DejaVu Sans not found}}}
+  \IfFontExistsTF{DejaVuSansMono.ttf}
+    {\setmonofont{DejaVuSansMono.ttf}}
+    {\typeout{UNIVERSUM: WARNING DejaVu Sans Mono not found}}
 \fi
 \usepackage[english,russian]{babel}
 \usepackage[margin=2.2cm,top=2.5cm,bottom=2.5cm]{geometry}
 \usepackage{microtype}
 \usepackage{amsmath,amssymb}
+\usepackage{amsthm}   % \qed и окружение proof
 \usepackage{graphicx}
 \usepackage{booktabs}   % \toprule/\midrule/\bottomrule
 \usepackage{tabularx}   % таблицы с переносом текста
@@ -46,9 +41,6 @@
 \usepackage{enumitem}
 \usepackage{fancyhdr}
 \usepackage{titlesec}
-% современный sans-serif (TeX Gyre Heros) как основной шрифт документа
-\renewcommand{\familydefault}{\sfdefault}
-
 % ---------- палитра ----------
 \definecolor{primary}{HTML}{000000}
 \definecolor{secondary}{HTML}{333333}
@@ -236,6 +228,12 @@
   \item Докажите формулу включений-исключений для трёх множеств.
   \item Приведите практический пример из вашей предметной области.
 \end{enumerate}
+
+\begin{proof}
+Докажем формулу включений-исключений для двух множеств: каждый элемент
+$A \cup B$ считается ровно один раз.
+\qed
+\end{proof}
 
 \section{Выводы}
 

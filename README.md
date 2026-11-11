@@ -152,14 +152,16 @@ universum/
 
 **Кириллица.** В преамбуле `iftex`: под `pdflatex` — `T2A` + `inputenc` + `lmodern`, под `xelatex`/`lualatex` (в т.ч. Tectonic) — `fontspec`. Основной язык babel ставится последним (`english,russian`) под язык документа.
 
-**Про шрифты (важно).** Ни `helvet`, ни **Latin Modern Sans/Termes не содержат кириллицы** — именно из-за этого русские буквы «исчезали». Поэтому sans берётся из `tex-gyre`:
+**Про шрифты (важно).** Ни `helvet`, ни Latin Modern, ни TeX Gyre Heros кириллицу в нужном начертании не дают (а `fontconfig` в Tectonic может быть недоступен — `Cannot load default config file`, поэтому шрифт по имени семейства там не находится). Решение — только `fontspec` + DejaVu, заданный **по имени файла** (поиск через `kpse`, без fontconfig):
 
-| Движок | Что подключается |
+| Движок | Шрифты |
 |---|---|
-| pdflatex | `lmodern` + `tgheros` (TeX Gyre Heros, кириллица в `T2A`) |
-| xelatex / lualatex / Tectonic | `fontspec` + `\setsansfont{texgyreheros}` / `\setmainfont{texgyretermes}` (по имени файла — через `kpse`, без fontconfig) |
+| xelatex / lualatex / Tectonic | `fontspec`: `\setmainfont{DejaVuSerif.ttf}` (DejaVu Serif), `\setsansfont{DejaVuSans.ttf}` (заголовки, титул), `\setmonofont{DejaVuSansMono.ttf}` (листинги); запасной вариант — Liberation Serif/Sans |
+| pdflatex | `T2A` + `inputenc` + `lmodern` (кириллица в `T2A`, шрифт менять не нужно) |
 
-Если `tex-gyre` в дистрибутиве нет, идёт цепочка запасных вариантов: CMU (`cmunss.otf`) → DejaVu → стандартный шрифт с предупреждением в логе. Если кириллица всё же теряется, компилятор это видит (`Missing character … U+04xx`, `latex_compiler.has_missing_cyrillic`) и выдаёт понятную ошибку с просьбой поставить `tex-gyre` — вместо PDF с «дырами».
+Основной шрифт документа — **DejaVu Serif** (`\familydefault` больше не переключается на sans). Если DejaVu нет, берётся Liberation Serif, иначе в лог пишется предупреждение. Массовая потеря кириллицы (`Missing character … U+04xx`) распознаётся (`latex_compiler.has_missing_cyrillic`) и превращается в понятную ошибку вместо PDF с «дырами».
+
+**Математика и доказательства.** Подключены `amsmath`, `amssymb`, `amsthm` — работают окружение `proof` и символ `\qed` (раньше `\qed` давал `Undefined control sequence`).
 
 **Иконки.** Каждая иконка вызывается через `\ifcsname`: в разных версиях `fontawesome5` часть глифов отсутствует (например `\faCalendarAlt`), и без проверки это давало `Undefined control sequence`. Теперь отсутствующая иконка просто не печатается.
 
