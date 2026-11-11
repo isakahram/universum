@@ -625,9 +625,11 @@ def test_preamble_is_engine_agnostic():
         assert r"\usepackage[T2A]{fontenc}" in pre      # pdflatex + кириллица
         assert r"\usepackage{fontspec}" in pre           # xelatex/lualatex (Tectonic)
         assert "fontawesome5" in pre or style != Style.COLORFUL
-        # кириллический sans вместо helvet (у helvet нет T2A-кириллицы)
+        # «сложные» шрифты убраны: ни helvet, ни TeX Gyre, ни форсированного sans
         assert r"\usepackage[scaled=0.92]{helvet}" not in pre
-        assert r"\familydefault}{\sfdefault}" in pre
+        assert "texgyre" not in pre.lower()
+        assert "tgheros" not in pre
+        assert r"\familydefault}{\sfdefault}" not in pre
 
 
 def test_preamble_language_order():
@@ -799,18 +801,36 @@ def test_preamble_loads_commands_allowed_by_prompt():
 # ---------------------------------------------------------------------------
 
 def test_preamble_uses_cyrillic_capable_fonts():
-    """lmsans/lmroman кириллицы не содержат — нужен tex-gyre (и fallback)."""
+    """Latin Modern кириллицы не содержит — основной шрифт DejaVu Serif.
+
+    Шрифт задаётся по имени ФАЙЛА: в Tectonic fontconfig может быть недоступен,
+    и \\setmainfont{DejaVu Serif} по имени семейства там не сработает.
+    """
     from universum.prompts import build_preamble
 
     for style in Style:
         pre = build_preamble(style)
-        assert "tgheros" in pre                       # pdflatex: T2A-кириллица
-        assert "texgyreheros-regular.otf" in pre      # xelatex/lualatex/Tectonic
-        assert "texgyretermes-regular.otf" in pre
-        assert "cmunss.otf" in pre                    # fallback CMU
-        assert "DejaVuSans.ttf" in pre                # fallback DejaVu
-        assert "\\IfFontExistsTF" in pre
-        assert "\\familydefault}{\\sfdefault}" in pre
+        assert r"\setmainfont{DejaVuSerif.ttf}" in pre        # основной шрифт
+        assert "LiberationSerif-Regular.ttf" in pre            # запасной вариант
+        assert r"\setsansfont{DejaVuSans.ttf}" in pre         # заголовки/титул
+        assert r"\setmonofont{DejaVuSansMono.ttf}" in pre     # листинги
+        assert r"\IfFontExistsTF" in pre
+        # никаких TeX Gyre / cm-unicode
+        assert "texgyre" not in pre.lower()
+        assert "cmunss" not in pre and "cmunrm" not in pre
+        # pdflatex-ветка сохраняет T2A-кириллицу
+        assert r"\usepackage[T2A]{fontenc}" in pre
+
+
+def test_preamble_has_amsthm_for_qed():
+    """\\qed (и окружение proof) дают только amsthm: без него падало
+    «Undefined control sequence \\qed»."""
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style)
+        assert r"\usepackage{amsthm}" in pre
+        assert "amssymb" in pre
 
 
 def test_icons_are_guarded_against_missing_glyphs():
