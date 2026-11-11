@@ -13,6 +13,7 @@ Tectonic — один бинарь с GitHub, не требует установ
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,65 @@ from .config import LatexConfig, get_config
 from .utils import LatexCompileError, get_logger, log_event, sanitize_latex
 
 ProgressFn = Callable[[str], None]
+
+
+# Магическая строка TeXShop/TeXstudio: "% !TEX program = pdflatex"
+_MAGIC_ENGINE_RE = re.compile(
+    r"^\s*%\s*!TEX\s+(?:program|TS-program)\s*=\s*([A-Za-z]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_KNOWN_ENGINES = ("pdflatex", "xelatex", "lualatex", "tectonic")
+
+
+# Ошибки преамбулы (шаблона) — ремонт через LLM их не исправит:
+# не хватает пакета/шрифта в дистрибутиве LaTeX.
+_PREAMBLE_ERROR_RE = re.compile(
+    r"File `[^']+\.(?:sty|cls|def|fd)' not found"
+    r"|! LaTeX Error: File `"
+    r"|! Package fontspec Error: The font"
+    r"|! Font \\[^ ]+ not loadable",
+    re.IGNORECASE,
+)
+
+
+def is_preamble_error(log: str) -> bool:
+    """Похоже ли, что компиляция упала из-за преамбулы (нет пакета/шрифта).
+
+    Такую ошибку нельзя исправить авто-ремонтом тела: преамбула фиксирована
+    шаблоном, а отсутствующий в TeX-дистрибутиве пакет нужно установить.
+
+    Args:
+        log: Лог компилятора.
+
+    Returns:
+        True, если ошибка относится к пакетам/шрифтам преамбулы.
+    """
+    return bool(_PREAMBLE_ERROR_RE.search(_text(log)))
+
+
+def engine_from_magic(code: str) -> str | None:
+    """Прочитать желаемый движок из магической строки ``% !TEX program = ...``.
+
+    Args:
+        code: LaTeX-документ.
+
+    Returns:
+        Имя движка (``pdflatex``/``xelatex``/``lualatex``/``tectonic``) или None.
+    """
+    match = _MAGIC_ENGINE_RE.search(_text(code))
+    if not match:
+        return None
+    name = match.group(1).strip().lower()
+    if name in ("latex", "pdftex"):
+        return "pdflatex"
+    if name in ("xetex", "xelatex"):
+        return "xelatex"
+    if name in ("luatex", "lualatex"):
+        return "lualatex"
+    if name == "tectonic":
+        return "tectonic"
+    return name if name in _KNOWN_ENGINES else None
 
 
 def _text(value: object | None) -> str:
@@ -235,7 +295,19 @@ def _compile_latex_impl(
     tex_file.write_text(latex_code, encoding="utf-8")
     log_event(f"LaTeX compile workdir={workdir} chars={len(latex_code)}")
 
-    engine = find_engine(tuple(getattr(cfg, "engine_preference", ()) or ()))
+    preference = tuple(getattr(cfg, "engine_preference", ()) or ())
+    # Магическая строка "% !TEX program = pdflatex" имеет приоритет, если движок есть
+    magic_engine = engine_from_magic(latex_code)
+    if magic_engine:
+        if shutil.which(magic_engine):
+            preference = (magic_engine,) + tuple(e for e in preference if e != magic_engine)
+            log_event(f"LaTeX magic engine={magic_engine} selected")
+        else:
+            # Например, в системе только Tectonic (XeTeX): преамбула шаблона
+            # движок-агностична (iftex), поэтому компилируем тем, что есть.
+            log_event(f"LaTeX magic engine={magic_engine} not found, using fallback preference")
+
+    engine = find_engine(preference)
     engine_cmd = _engine_command(engine)
     if engine_cmd is None:
         # Попытка авто-скачивания Tectonic
@@ -331,6 +403,8 @@ def compile_with_repair(
     config: LatexConfig | None = None,
     progress: ProgressFn | None = None,
     cancel_event=None,
+    postprocess: Callable[[str], str] | None = None,
+    prompt_view: Callable[[str], str] | None = None,
 ) -> CompileResult:
     """Компиляция с авто-ремонтом через LLM (до N попыток).
 
@@ -340,6 +414,10 @@ def compile_with_repair(
         config: Конфигурация.
         progress: Колбэк прогресса.
         cancel_event: Событие отмены.
+        postprocess: Преобразование ответа LLM в компилируемый документ
+            (например, обёртка тела фиксированной преамбулой стиля).
+        prompt_view: Преобразование документа в текст для промта ремонта
+            (например, только тело без преамбулы).
 
     Returns:
         Успешный CompileResult или последний неудачный (с логом).
@@ -366,19 +444,33 @@ def compile_with_repair(
             return result
         if attempt >= max_repairs:
             break
+        # Ошибки преамбулы ремонтом не лечатся — не тратим 3 попытки LLM
+        if is_preamble_error(result.log):
+            raise LatexCompileError(
+                "В LaTeX-дистрибутиве не хватает пакета или шрифта, который использует шаблон "
+                "(tcolorbox, fontawesome5, tikz, fontspec). Установите полный TeX Live / MiKTeX "
+                "или разрешите авто-скачивание Tectonic (нужен интернет). Лог — ниже.",
+                log=_text(result.log),
+            )
+
         # Авто-ремонт
         if progress:
             progress(f"Исправление ошибок LaTeX (попытка {attempt + 1}/{max_repairs})…")
         log_event(f"LaTeX repair attempt={attempt + 1}")
         try:
-            repair_prompt = build_repair_prompt(current, _text(result.log))
+            shown = prompt_view(current) if prompt_view is not None else current
+            repair_prompt = build_repair_prompt(shown, _text(result.log))
             fixed_raw = _text(llm_generate(SYSTEM_PROMPT, repair_prompt))
-            fixed = extract_latex(fixed_raw)
+            if postprocess is not None:
+                # Собираем документ заново: тело от модели + наша преамбула
+                fixed = postprocess(fixed_raw)
+            else:
+                fixed = extract_latex(fixed_raw)
+            if not fixed or not fixed.strip():
+                continue
             problems = validate_latex(fixed)
             if problems:
                 get_logger().warning("Repair produced invalid LaTeX: %s", problems)
-            if not fixed:
-                continue
             current = fixed
         except Exception as e:
             get_logger().warning("Repair LLM call failed: %s", e)

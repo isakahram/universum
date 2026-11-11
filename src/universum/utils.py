@@ -149,6 +149,58 @@ def sanitize_latex(code: str) -> str:
     return text
 
 
+def extract_document_body(raw: str) -> str:
+    """Извлечь ТЕЛО LaTeX-документа из ответа нейросети.
+
+    Модель должна вернуть только содержимое между ``\\begin{document}`` и
+    ``\\end{document}`` (преамбула задаётся приложением). Но она иногда
+    возвращает полный документ или markdown-обёртку — здесь всё приводится
+    к телу: снимаются ```-блоки, отрезается преамбула и ``\\end{document}``,
+    убирается магическая строка ``% !TEX``.
+
+    Args:
+        raw: Сырой ответ LLM (может быть None/пустым).
+
+    Returns:
+        Тело документа (может быть пустым, если ничего не найдено).
+    """
+    text = "" if raw is None else str(raw)
+    if not text.strip():
+        return ""
+    # markdown-обёртки ```latex ... ```
+    fences = _FENCE_RE.findall(text)
+    candidates = [f.strip() for f in fences if f.strip()]
+    if candidates:
+        # Предпочитаем блок с \begin{document} или \makelecturetitle
+        for c in candidates:
+            if r"\begin{document}" in c or r"\makelecturetitle" in c:
+                text = c
+                break
+        else:
+            text = max(candidates, key=len)
+    # Отрезать преамбулу
+    begin = text.find(r"\begin{document}")
+    if begin != -1:
+        text = text[begin + len(r"\begin{document}"):]
+    # Отрезать \end{document} и всё после
+    end = text.find(r"\end{document}")
+    if end != -1:
+        text = text[:end]
+    # Убрать магическую строку и \documentclass/\usepackage, если модель их всё же вставила
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("% !TEX"):
+            continue
+        if stripped.startswith(r"\documentclass") or stripped.startswith(r"\usepackage"):
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+    # Убрать осиротевшие \begin{document}/\end{document} (двойные обёртки)
+    text = text.replace(r"\end{document}", "").replace(r"\begin{document}", "")
+    return sanitize_latex(text.strip())
+
+
 def validate_latex(code: str) -> list[str]:
     """Проверить базовую целостность LaTeX-кода.
 
@@ -180,7 +232,8 @@ def validate_latex(code: str) -> list[str]:
             if cb[env] != ce[env]:
                 problems.append(f"Несбалансированное окружение '{env}': begin={cb[env]}, end={ce[env]}.")
     # Запрещённые пакеты (ломают компиляцию без shell-escape / внешних файлов)
-    for pkg in ("minted", "tikz", "pgf", "biblatex", "biber", "glossaries", "cleveref", "siunitx"):
+    # tikz/tcolorbox/fontawesome5 разрешены: они уже подключены в преамбуле шаблона
+    for pkg in ("minted", "biblatex", "biber", "glossaries", "cleveref", "siunitx"):
         if re.search(rf"\\usepackage(\[[^\]]*\])?\{{[^}}]*\b{pkg}\b", code):
             problems.append(f"Запрещённый пакет '{pkg}' — удалите его (см. правила промта).")
     if r"\includegraphics" in code:
