@@ -50,6 +50,36 @@ _PREAMBLE_ERROR_RE = re.compile(
 )
 
 
+# Шрифт без кириллицы: XeTeX пишет предупреждение на каждый отсутствующий глиф
+_MISSING_CYRILLIC_RE = re.compile(
+    r"Missing character: There is no .{0,4} ?\(U\+04[0-9A-Fa-f]{2}\)"
+)
+
+
+def has_missing_cyrillic(log: str, threshold: int = 5) -> bool:
+    """Есть ли в логе потеря кириллических глифов (шрифт без кириллицы).
+
+    Такая ошибка не лечится ни промтом, ни авто-ремонтом: нужен шрифт с
+    кириллицей (tex-gyre) или другое начертание.
+
+    Args:
+        log: Лог компилятора.
+        threshold: Сколько предупреждений считать проблемой.
+
+    Returns:
+        True, если кириллица теряется.
+    """
+    return len(_MISSING_CYRILLIC_RE.findall(_text(log))) >= threshold
+
+
+_CYRILLIC_ADVICE = (
+    "\n\nВНИМАНИЕ: используемый шрифт не содержит кириллических символов "
+    "(в логе «Missing character … U+04xx»). Установите пакет tex-gyre "
+    "(TeX Live: texlive-fonts-extra, MiKTeX: tex-gyre) или разрешите "
+    "авто-скачивание Tectonic — после этого русский текст перестанет выпадать."
+)
+
+
 def is_preamble_error(log: str) -> bool:
     """Похоже ли, что компиляция упала из-за преамбулы (нет пакета/шрифта).
 
@@ -377,6 +407,15 @@ def _compile_latex_impl(
         return CompileResult(success=False, pdf_path=None, log="\n".join(p for p in log_parts if p), engine=engine_name)
 
     full_log = "\n".join(part for part in log_parts if part).strip()
+
+    # Шрифт без кириллицы: PDF мог собраться, но без русских букв.
+    # Лучше честная ошибка, чем документ с «дырами».
+    if has_missing_cyrillic(full_log):
+        log_event("LaTeX compile: missing Cyrillic glyphs in font")
+        return CompileResult(
+            success=False, pdf_path=None, log=full_log + _CYRILLIC_ADVICE, engine=engine_name
+        )
+
     pdf_path = workdir / "document.pdf"
     try:
         if pdf_path.exists() and pdf_path.stat().st_size > 0:
@@ -450,6 +489,13 @@ def compile_with_repair(
                 "В LaTeX-дистрибутиве не хватает пакета или шрифта, который использует шаблон "
                 "(tcolorbox, fontawesome5, tikz, fontspec). Установите полный TeX Live / MiKTeX "
                 "или разрешите авто-скачивание Tectonic (нужен интернет). Лог — ниже.",
+                log=_text(result.log),
+            )
+        if has_missing_cyrillic(result.log):
+            raise LatexCompileError(
+                "Шрифт в вашем LaTeX-дистрибутиве не содержит кириллицы, поэтому русский текст "
+                "пропадает в PDF. Установите пакет tex-gyre (TeX Live: texlive-fonts-extra, "
+                "MiKTeX: tex-gyre) — шаблон автоматически возьмёт TeX Gyre Heros. Лог — ниже.",
                 log=_text(result.log),
             )
 

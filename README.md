@@ -150,7 +150,18 @@ universum/
 - `Строгий` — те же блоки и структура, но монохром: чёрные рамки, без иконок, строгий титул с линейкой.
 - `Без стиля` — минимум: блоки как простые абзацы, без tcolorbox, иконок и цветов.
 
-**Кириллица.** В преамбуле `iftex`: под `pdflatex` — `T2A` + `inputenc` + `lmodern`, под `xelatex`/`lualatex` (в т.ч. Tectonic) — `fontspec`. Основной язык babel ставится последним (`english,russian`) под язык документа. Вместо `helvet` используется **Latin Modern Sans** (`\familydefault=\sfdefault`): у `helvet` нет кириллицы в `T2A`, из-за чего русский текст и «пропадал».
+**Кириллица.** В преамбуле `iftex`: под `pdflatex` — `T2A` + `inputenc` + `lmodern`, под `xelatex`/`lualatex` (в т.ч. Tectonic) — `fontspec`. Основной язык babel ставится последним (`english,russian`) под язык документа.
+
+**Про шрифты (важно).** Ни `helvet`, ни **Latin Modern Sans/Termes не содержат кириллицы** — именно из-за этого русские буквы «исчезали». Поэтому sans берётся из `tex-gyre`:
+
+| Движок | Что подключается |
+|---|---|
+| pdflatex | `lmodern` + `tgheros` (TeX Gyre Heros, кириллица в `T2A`) |
+| xelatex / lualatex / Tectonic | `fontspec` + `\setsansfont{texgyreheros}` / `\setmainfont{texgyretermes}` (по имени файла — через `kpse`, без fontconfig) |
+
+Если `tex-gyre` в дистрибутиве нет, идёт цепочка запасных вариантов: CMU (`cmunss.otf`) → DejaVu → стандартный шрифт с предупреждением в логе. Если кириллица всё же теряется, компилятор это видит (`Missing character … U+04xx`, `latex_compiler.has_missing_cyrillic`) и выдаёт понятную ошибку с просьбой поставить `tex-gyre` — вместо PDF с «дырами».
+
+**Иконки.** Каждая иконка вызывается через `\ifcsname`: в разных версиях `fontawesome5` часть глифов отсутствует (например `\faCalendarAlt`), и без проверки это давало `Undefined control sequence`. Теперь отсутствующая иконка просто не печатается.
 
 **Магическая строка и движок.** Первая строка документа — `% !TEX program = pdflatex`: её понимают TeXstudio/TeXShop (открывают файл с нужным движком). `latex_compiler.engine_from_magic()` читает её и **ставит pdflatex первым**, если он установлен. Tectonic магические строки не читает (он XeTeX-движок) — документ всё равно собирается благодаря `iftex`-ветке, это пишется в лог.
 

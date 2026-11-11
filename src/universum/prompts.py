@@ -74,13 +74,36 @@ _PALETTES: dict[Style, dict[str, str]] = {
 _PREAMBLE_COMMON = r"""
 \usepackage{iftex}
 \ifPDFTeX
-  % pdflatex: 8-битные шрифты, кириллица через T2A + Latin Modern
+  % pdflatex: 8-битные шрифты. T2A даёт кириллицу.
   \usepackage[T2A]{fontenc}
   \usepackage[utf8]{inputenc}
   \usepackage{lmodern}
+  % TeX Gyre Heros (Helvetica-подобный) содержит кириллицу в T2A.
+  % ВАЖНО: Latin Modern Sans (lmsans) кириллицы НЕ содержит — русский текст
+  % в нём превращается в пустые места, поэтому sans берём из tex-gyre.
+  \IfFileExists{tgheros.sty}{\usepackage{tgheros}}{\typeout{UNIVERSUM: tgheros not found}}
 \else
-  % xelatex/lualatex (в т.ч. Tectonic): Unicode-шрифты
+  % xelatex/lualatex (в т.ч. Tectonic): Unicode-шрифты через fontspec.
   \usepackage{fontspec}
+  % Latin Modern (lmroman/lmsans) кириллицы НЕ содержит -> берём шрифты с
+  % кириллицей, по имени файла (поиск через kpse, без fontconfig):
+  % TeX Gyre Heros/Termes -> CMU -> DejaVu -> предупреждение.
+  \IfFontExistsTF{texgyreheros-regular.otf}
+    {\setsansfont{texgyreheros}[Extension=.otf,
+        UprightFont=*-regular, BoldFont=*-bold,
+        ItalicFont=*-italic, BoldItalicFont=*-bolditalic]}
+    {\IfFontExistsTF{cmunss.otf}
+      {\setsansfont{CMU Sans Serif}}
+      {\IfFontExistsTF{DejaVuSans.ttf}
+        {\setsansfont{DejaVu Sans}}
+        {\typeout{UNIVERSUM: WARNING no Cyrillic-capable sans font (install tex-gyre)}}}}
+  \IfFontExistsTF{texgyretermes-regular.otf}
+    {\setmainfont{texgyretermes}[Extension=.otf,
+        UprightFont=*-regular, BoldFont=*-bold,
+        ItalicFont=*-italic, BoldItalicFont=*-bolditalic]}
+    {\IfFontExistsTF{cmunrm.otf}
+      {\setmainfont{CMU Serif}}
+      {\IfFontExistsTF{DejaVuSerif.ttf}{\setmainfont{DejaVu Serif}}{}}}
 \fi
 \usepackage[@BABELOPTS@]{babel}
 \usepackage[margin=2.2cm,top=2.5cm,bottom=2.5cm]{geometry}
@@ -94,7 +117,7 @@ _PREAMBLE_COMMON = r"""
 \usepackage{enumitem}
 \usepackage{fancyhdr}
 \usepackage{titlesec}
-% современный sans-serif: Latin Modern Sans (в отличие от helvet содержит кириллицу)
+% современный sans-serif (TeX Gyre Heros) как основной шрифт документа
 \renewcommand{\familydefault}{\sfdefault}
 
 % ---------- палитра ----------
@@ -225,37 +248,28 @@ _PLAIN_BOXES = r"""
 # Преамбула: иконки
 # ---------------------------------------------------------------------------
 
-_ICONS_ON = r"""
-% ---------- иконки (если пакет есть) ----------
-\newif\ifuniversumicons
-\IfFileExists{fontawesome5.sty}{\universumiconstrue}{\universumiconsfalse}
-\ifuniversumicons
-  \usepackage{fontawesome5}
-  \newcommand{\iconBulb}{\faLightbulb\enspace}
-  \newcommand{\iconBook}{\faBookOpen\enspace}
-  \newcommand{\iconFlask}{\faFlask\enspace}
-  \newcommand{\iconWarn}{\faExclamationTriangle\enspace}
-  \newcommand{\iconRight}{\faChevronRight}
-  \newcommand{\iconGrad}{\faGraduationCap}
-  \newcommand{\iconUser}{\faUserGraduate\ }
-  \newcommand{\iconCal}{\faCalendarAlt\ }
-\else
-  \newcommand{\iconBulb}{}\newcommand{\iconBook}{}\newcommand{\iconFlask}{}
-  \newcommand{\iconWarn}{}\newcommand{\iconRight}{$\triangleright$}
-  \newcommand{\iconGrad}{}\newcommand{\iconUser}{}\newcommand{\iconCal}{}
-\fi
+_ICONS_LOAD = r"""
+% ---------- иконки: грузим только если пакет есть ----------
+\IfFileExists{fontawesome5.sty}{\usepackage{fontawesome5}}{}
 """
 
-_ICONS_OFF = r"""
-% ---------- иконки отключены ----------
-\newcommand{\iconBulb}{}
-\newcommand{\iconBook}{}
-\newcommand{\iconFlask}{}
-\newcommand{\iconWarn}{}
-\newcommand{\iconRight}{$\triangleright$}
-\newcommand{\iconGrad}{}
-\newcommand{\iconUser}{}
-\newcommand{\iconCal}{}
+_ICONS_MACROS = r"""
+% ---------- иконки ----------
+% Каждая иконка проверяется через \ifcsname: если пакета нет или в этой версии
+% fontawesome5 глифа нет (например \faCalendarAlt), команда просто пустая
+% и документ всё равно собирается (иначе «Undefined control sequence»).
+\newcommand{\universumicon}[1]{\ifcsname #1\endcsname\csname #1\endcsname\enspace\fi}
+\newcommand{\iconBulb}{\universumicon{faLightbulb}}
+\newcommand{\iconBook}{\universumicon{faBookOpen}}
+\newcommand{\iconFlask}{\universumicon{faFlask}}
+\newcommand{\iconWarn}{\universumicon{faExclamationTriangle}}
+\newcommand{\iconGrad}{\universumicon{faGraduationCap}}
+\newcommand{\iconUser}{\ifcsname faUserGraduate\endcsname\faUserGraduate\enspace
+  \else\ifcsname faUser\endcsname\faUser\enspace\fi\fi}
+\newcommand{\iconCal}{\ifcsname faCalendarAlt\endcsname\faCalendarAlt\enspace
+  \else\ifcsname faCalendarDays\endcsname\faCalendarDays\enspace
+  \else\ifcsname faCalendar\endcsname\faCalendar\enspace\fi\fi\fi}
+\newcommand{\iconRight}{\ifcsname faChevronRight\endcsname\faChevronRight\else$\triangleright$\fi}
 """
 
 
@@ -464,13 +478,17 @@ def build_preamble(style: Style, language: str = "ru") -> str:
     common = common.replace("@BABELOPTS@", babel_opts)
 
     if style == Style.COLORFUL:
-        icons, boxes, titlepage = _ICONS_ON, _BOXES_COLORFUL, _TITLEPAGE_COLORFUL
+        # иконки только в красочном стиле
+        icons = _ICONS_LOAD + _ICONS_MACROS
+        boxes, titlepage = _BOXES_COLORFUL, _TITLEPAGE_COLORFUL
         titles, headers = _TITLES_COLORFUL, _HEADERS_COLORFUL
     elif style == Style.STRICT:
-        icons, boxes, titlepage = _ICONS_OFF, _BOXES_STRICT, _TITLEPAGE_STRICT
+        icons = _ICONS_MACROS
+        boxes, titlepage = _BOXES_STRICT, _TITLEPAGE_STRICT
         titles, headers = _TITLES_STRICT, _HEADERS_STRICT
     else:  # Style.PLAIN — блоки без рамок, вызываются сразу
-        icons, boxes, titlepage = _ICONS_OFF, _PLAIN_BOXES + "\n\\universumplainboxes\n", _TITLEPAGE_PLAIN
+        icons = _ICONS_MACROS
+        boxes, titlepage = _PLAIN_BOXES + "\n\\universumplainboxes\n", _TITLEPAGE_PLAIN
         titles, headers = _TITLES_PLAIN, _HEADERS_PLAIN
 
     return "\n".join(
