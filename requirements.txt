@@ -13,6 +13,9 @@ pytesseract>=0.3.13      # OCR через системный Tesseract (нуже
 # --- Веб-поиск (без ключа) ---
 ddgs>=9.0                # DuckDuckGo поиск; если недоступен — есть fallback на stdlib
 
+# --- Безопасное хранение API-ключа (опционально, но рекомендуется) ---
+keyring>=24.0            # OS keyring: Windows Credential Manager / macOS Keychain / Secret Service
+
 # --- Утилиты ---
 # requests не обязателен: HTTP реализован на urllib из stdlib.
 # Но для удобства отладки можно установить:
