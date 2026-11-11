@@ -21,7 +21,7 @@ from universum.config import (
     mask_key,
 )
 from universum.file_parser import parse_file
-from universum.llm_client import friendly_http_error, friendly_network_error
+from universum.llm_client import build_payload, effective_max_tokens, friendly_http_error, friendly_network_error
 from universum.prompts import (
     SYSTEM_PROMPT,
     build_generation_prompt,
@@ -180,6 +180,57 @@ def test_config_pollinations_no_key():
     s = LlmSettings(provider=LlmProvider.POLLINATIONS)
     cfg = LlmConfig.from_settings(s)
     assert cfg.endpoints[0][2] is False
+
+
+def test_pollinations_new_endpoint_and_model():
+    assert PROVIDER_PRESETS[LlmProvider.POLLINATIONS]["url"] == "https://gen.pollinations.ai/v1/chat/completions"
+    assert PROVIDER_PRESETS[LlmProvider.POLLINATIONS]["model"] == "openai"
+    cfg = LlmConfig()
+    assert cfg.primary_url == "https://gen.pollinations.ai/v1/chat/completions"
+    assert cfg.model == "openai"
+    assert cfg.max_tokens is None  # не отправляем — сервер решает
+
+
+def test_pollinations_migration():
+    from universum.config import migrate_pollinations_model, migrate_pollinations_url
+
+    assert migrate_pollinations_url("https://text.pollinations.ai/openai") == "https://gen.pollinations.ai/v1/chat/completions"
+    assert migrate_pollinations_model("openai-fast") == "openai"
+    s = LlmSettings(provider=LlmProvider.POLLINATIONS, url="https://text.pollinations.ai/openai", model="openai-fast")
+    assert s.resolved_url() == "https://gen.pollinations.ai/v1/chat/completions"
+    assert s.resolved_model() == "openai"
+
+
+def test_no_old_pollinations_anywhere():
+    # Активные эндпоинты не должны указывать на старый text.pollinations.ai
+    # (константа OLD_POLLINATIONS_URL для миграции — допустима).
+    from universum.config import OLD_POLLINATIONS_URL, PROVIDER_PRESETS
+
+    assert OLD_POLLINATIONS_URL == "https://text.pollinations.ai/openai"
+    for preset in PROVIDER_PRESETS.values():
+        assert "text.pollinations.ai" not in str(preset.get("url", ""))
+    assert "text.pollinations.ai" not in LlmConfig().primary_url
+
+
+def test_effective_max_tokens():
+    assert effective_max_tokens("https://gen.pollinations.ai/v1/chat/completions", 8192) is None
+    assert effective_max_tokens("https://gen.pollinations.ai/v1/chat/completions", None) is None
+    assert effective_max_tokens("https://api.openai.com/v1/chat/completions", None) is None
+    assert effective_max_tokens("https://api.openai.com/v1/chat/completions", 1500) == 1500
+
+
+def test_build_payload_omits_max_tokens_for_pollinations():
+    cfg = LlmConfig(max_tokens=8192)  # даже если настроено — для Pollinations не отправляем
+    p = build_payload("openai", "sys", "user", "https://gen.pollinations.ai/v1/chat/completions", cfg)
+    assert "max_tokens" not in p
+    assert p["model"] == "openai"
+    p2 = build_payload("gpt-4o-mini", "sys", "user", "https://api.openai.com/v1/chat/completions", cfg)
+    assert p2["max_tokens"] == 8192
+
+
+def test_token_limit_error_message():
+    msg = friendly_http_error(400, '{"code":"output_token_limit_exceeded"}')
+    assert "ограничил" in msg.lower()
 
 
 def test_friendly_errors():

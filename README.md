@@ -76,7 +76,7 @@ universum
 |---|---|---|
 | Язык | **Python 3.11+** | Кроссплатформенность, стандартная библиотека покрывает HTTP/JSON/архивы |
 | GUI | **Tkinter (stdlib)** | Встроен в Python, $0, работает на Windows/macOS/Linux без сборки; превью стилей рисуются на Canvas |
-| Нейросеть | **Pollinations.ai** (`https://text.pollinations.ai/openai`, OpenAI-совместимый) | Бесплатно, **без ключа**, без регистрации. Fallback — локальный **Ollama** (`localhost:11434`), если запущен. Опционально: свой эндпоинт через `UNIVERSUM_LLM_URL` |
+| Нейросеть | **Pollinations.ai** (`https://gen.pollinations.ai/v1/chat/completions`, модель `openai`, OpenAI-совместимый) | Бесплатно, **без ключа**, без регистрации. `max_tokens` не отправляется (сервер сам решает лимит). Fallback — локальный **Ollama** (`localhost:11434`), если запущен. Опционально: свой эндпоинт/ключ через GUI или `UNIVERSUM_LLM_URL` |
 | Веб-поиск | **DuckDuckGo** (`ddgs` + fallback на stdlib-скрейпинг `html.duckduckgo.com`) | Бесплатно, без ключа; только по чекбоксу |
 | LaTeX | **Tectonic** (авто-скачивание с GitHub) → xelatex → pdflatex → lualatex | Tectonic — один бинарь, не требует TeX Live; если TeX Live/MiKTeX уже есть — используется он |
 | Парсинг | `pypdf`, `python-docx`, `python-pptx`, `Pillow` + `pytesseract` (OCR) | Ленивые импорты: без пакетов приложение всё равно запускается |
@@ -139,7 +139,7 @@ universum/
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `UNIVERSUM_LLM_URL` | Pollinations | Свой OpenAI-совместимый эндпоинт |
-| `UNIVERSUM_LLM_MODEL` | `openai-fast` | Модель на Pollinations |
+| `UNIVERSUM_LLM_MODEL` | `openai` | Модель на Pollinations |
 | `UNIVERSUM_LLM_KEY` | *(пусто)* | Ключ только если ваш эндпоинт его требует |
 
 Локальный Ollama подхватывается автоматически, если запущен (`ollama serve` + `ollama pull llama3.1:8b`).

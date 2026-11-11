@@ -105,10 +105,17 @@ class LlmProvider(str, Enum):
 
 
 # Пресеты провайдеров: url, модель по умолчанию, нужен ли ключ
+# Pollinations: актуальный эндпоинт gen.pollinations.ai (старый text.pollinations.ai
+# отвечает 400 output_token_limit_exceeded при max_tokens=8192).
+POLLINATIONS_URL = "https://gen.pollinations.ai/v1/chat/completions"
+POLLINATIONS_MODEL = "openai"
+OLD_POLLINATIONS_URL = "https://text.pollinations.ai/openai"
+OLD_POLLINATIONS_MODEL = "openai-fast"
+
 PROVIDER_PRESETS: dict[LlmProvider, dict[str, object]] = {
     LlmProvider.POLLINATIONS: {
-        "url": "https://text.pollinations.ai/openai",
-        "model": "openai-fast",
+        "url": POLLINATIONS_URL,
+        "model": POLLINATIONS_MODEL,
         "needs_key": False,
     },
     LlmProvider.OPENAI: {
@@ -155,6 +162,27 @@ def is_localhost_url(url: str) -> bool:
     return "localhost" in u or "127.0.0.1" in u or "[::1]" in u
 
 
+def migrate_pollinations_url(url: str) -> str:
+    """Мигрировать старый URL Pollinations на новый gen.pollinations.ai."""
+    u = (url or "").strip()
+    if "text.pollinations.ai" in u:
+        return POLLINATIONS_URL
+    return u
+
+
+def migrate_pollinations_model(model: str) -> str:
+    """Мигрировать старую модель Pollinations на актуальную."""
+    m = (model or "").strip()
+    if m == OLD_POLLINATIONS_MODEL:
+        return POLLINATIONS_MODEL
+    return m
+
+
+def is_pollinations_url(url: str) -> bool:
+    """Проверить, что URL — Pollinations (для него max_tokens не отправляем)."""
+    return "pollinations.ai" in (url or "").lower()
+
+
 def settings_dir() -> Path:
     """Папка пользовательских настроек (~/.universum)."""
     return Path.home() / ".universum"
@@ -170,18 +198,18 @@ class LlmSettings:
     api_key: str = ""
 
     def resolved_url(self) -> str:
-        """URL с учётом пресета провайдера."""
+        """URL с учётом пресета провайдера (старый Pollinations мигрируется)."""
         if self.url.strip():
-            return self.url.strip()
+            return migrate_pollinations_url(self.url.strip())
         preset = PROVIDER_PRESETS.get(self.provider, {})
-        return str(preset.get("url", ""))
+        return migrate_pollinations_url(str(preset.get("url", "")))
 
     def resolved_model(self) -> str:
-        """Модель с учётом пресета провайдера."""
+        """Модель с учётом пресета провайдера (старая Pollinations мигрируется)."""
         if self.model.strip():
-            return self.model.strip()
+            return migrate_pollinations_model(self.model.strip())
         preset = PROVIDER_PRESETS.get(self.provider, {})
-        return str(preset.get("model", ""))
+        return migrate_pollinations_model(str(preset.get("model", "")))
 
     def __repr__(self) -> str:  # ключ никогда не попадает в repr/логи
         return f"LlmSettings(provider={self.provider.value}, url={self.resolved_url()!r}, model={self.resolved_model()!r}, api_key={mask_key(self.api_key)})"
@@ -271,19 +299,25 @@ def save_llm_settings(settings: LlmSettings) -> None:
 
 @dataclass(frozen=True)
 class LlmConfig:
-    """Настройки LLM-клиента (OpenAI-совместимый API)."""
+    """Настройки LLM-клиента (OpenAI-совместимый API).
 
-    primary_url: str = "https://text.pollinations.ai/openai"
+    Pollinations: строго https://gen.pollinations.ai/v1/chat/completions,
+    модель openai, max_tokens НЕ отправляется (сервер сам решает лимит —
+    иначе 400 output_token_limit_exceeded).
+    """
+
+    primary_url: str = POLLINATIONS_URL
     ollama_url: str = "http://localhost:11434/v1/chat/completions"
     ollama_model: str = "llama3.1:8b"
-    model: str = field(default_factory=lambda: os.getenv("UNIVERSUM_LLM_MODEL", "openai-fast"))
+    model: str = field(default_factory=lambda: migrate_pollinations_model(os.getenv("UNIVERSUM_LLM_MODEL", POLLINATIONS_MODEL)))
     api_key: str = field(default_factory=lambda: os.getenv("UNIVERSUM_LLM_KEY", ""))
-    custom_url: str = field(default_factory=lambda: os.getenv("UNIVERSUM_LLM_URL", ""))
+    custom_url: str = field(default_factory=lambda: migrate_pollinations_url(os.getenv("UNIVERSUM_LLM_URL", "")))
     provider: LlmProvider = LlmProvider.POLLINATIONS
     timeout_sec: int = 180
     max_retries: int = 3
     retry_backoff_sec: float = 2.0
-    max_tokens: int = 8192
+    # None = не отправлять max_tokens (сервер решает). Для Pollinations — всегда None.
+    max_tokens: int | None = None
     temperature: float = 0.7
 
     @classmethod
@@ -294,13 +328,13 @@ class LlmConfig:
         # Если провайдер Pollinations/Ollama — это primary, иначе custom
         if settings.provider in (LlmProvider.POLLINATIONS, LlmProvider.OLLAMA):
             return cls(
-                primary_url=url or "https://text.pollinations.ai/openai",
-                model=model or "openai-fast",
+                primary_url=url or POLLINATIONS_URL,
+                model=model or POLLINATIONS_MODEL,
                 api_key=settings.api_key.strip(),
                 provider=settings.provider,
             )
         return cls(
-            primary_url="https://text.pollinations.ai/openai",
+            primary_url=POLLINATIONS_URL,
             custom_url=url,
             model=model,
             api_key=settings.api_key.strip(),
