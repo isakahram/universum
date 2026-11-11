@@ -321,7 +321,10 @@ def build_repair_prompt(latex_code: str, error_log: str) -> str:
     Returns:
         Промт для LLM.
     """
+    # error_log может прийти как None (движок без вывода) — не падаем на срезе
+    safe_log = "" if error_log is None else str(error_log)
+    safe_code = "" if latex_code is None else str(latex_code)
     return REPAIR_PROMPT_TEMPLATE.format(
-        error_log=error_log[:8000],
-        latex_code=latex_code[:60000],
+        error_log=safe_log[:8000] or "(лог компилятора пуст)",
+        latex_code=safe_code[:60000],
     )

@@ -352,3 +352,112 @@ def test_generate_sends_authorization_header(monkeypatch):
     monkeypatch.setattr(client, "_post_with_headers", fake_post)
     assert client.generate("sys", "user")
     assert seen[0]["Authorization"] == "Bearer sk-ok"
+
+
+# ---------------------------------------------------------------------------
+# LaTeX-компилятор: устойчивость к None в выводе процесса / логах
+# ---------------------------------------------------------------------------
+
+class _FakeProc:
+    """Имитация CompletedProcess с None в потоках (причина TypeError)."""
+
+    def __init__(self, returncode=0):
+        self.returncode = returncode
+        self.stdout = None
+        self.stderr = None
+
+
+def test_text_normalizes_none():
+    from universum.latex_compiler import _text
+
+    assert _text(None) == ""
+    assert _text("abc") == "abc"
+    assert _text(b"abc") == "abc"
+    assert _text(42) == "42"
+
+
+def test_compile_result_normalizes_none_log():
+    from universum.latex_compiler import CompileResult
+
+    r = CompileResult(success=False, pdf_path=None, log=None, engine=None)  # type: ignore[arg-type]
+    assert r.log == ""
+    assert r.engine == ""
+    # конкатенация с логом больше не падает
+    assert ("Ошибка: " + r.log) == "Ошибка: "
+
+
+def test_compile_handles_none_stdout(monkeypatch, tmp_path):
+    """Регресс: 'can only concatenate str (not "NoneType") to str'."""
+    import universum.latex_compiler as lc
+
+    monkeypatch.setattr(lc, "find_engine", lambda preference: "tectonic")
+    monkeypatch.setattr(lc.subprocess, "run", lambda *a, **k: _FakeProc(returncode=1))
+
+    result = lc.compile_latex("\\documentclass{article}\\begin{document}x\\end{document}")
+    assert result.success is False
+    assert result.log  # лог — строка, не None
+    assert "кодом 1" in result.log
+
+
+def test_compile_handles_none_stdout_success_pdf(monkeypatch, tmp_path):
+    """Тот же None в потоках, но PDF создан — компиляция успешна."""
+    import universum.latex_compiler as lc
+
+    monkeypatch.setattr(lc, "find_engine", lambda preference: "tectonic")
+
+    def fake_run(cmd, cwd=None, **kwargs):
+        (tmp_path / "document.pdf").write_bytes(b"%PDF-1.4 fake")
+        # эмулируем запись в реальную рабочую папку
+        from pathlib import Path
+        Path(cwd, "document.pdf").write_bytes(b"%PDF-1.4 fake")
+        return _FakeProc(returncode=0)
+
+    monkeypatch.setattr(lc.subprocess, "run", fake_run)
+    result = lc.compile_latex("\\documentclass{article}\\end{document}")
+    assert result.success is True
+    assert result.pdf_path is not None and result.pdf_path.exists()
+
+
+def test_compile_no_engine_returns_friendly_log(monkeypatch):
+    import universum.latex_compiler as lc
+
+    monkeypatch.setattr(lc, "find_engine", lambda preference: None)
+    monkeypatch.setattr(lc, "ensure_tectonic", lambda progress=None: None)
+    result = lc.compile_latex("\\documentclass{article}\\end{document}")
+    assert result.success is False
+    assert "движок не найден" in result.log.lower()
+
+
+def test_compile_wraps_unexpected_exception(monkeypatch):
+    import universum.latex_compiler as lc
+
+    monkeypatch.setattr(lc, "find_engine", lambda preference: "tectonic")
+
+    def boom(*a, **k):
+        raise ValueError("странная ошибка")
+
+    monkeypatch.setattr(lc.subprocess, "run", boom)
+    result = lc.compile_latex("\\documentclass{article}\\end{document}")
+    assert result.success is False
+    assert "странная ошибка" in result.log
+    assert isinstance(result.log, str)
+
+
+def test_build_repair_prompt_with_none_log():
+    from universum.prompts import build_repair_prompt
+
+    text = build_repair_prompt("\\documentclass{article}", None)  # type: ignore[arg-type]
+    assert "лог компилятора пуст" in text
+
+
+def test_compile_with_repair_raises_with_string_log(monkeypatch):
+    import universum.latex_compiler as lc
+    from universum.utils import LatexCompileError
+
+    class Cfg:
+        max_repair_attempts = 1
+
+    monkeypatch.setattr(lc, "compile_latex", lambda code, **kw: lc.CompileResult(False, None, None))
+    with pytest.raises(LatexCompileError) as exc:
+        lc.compile_with_repair("x", lambda s, u: "y", config=Cfg())
+    assert isinstance(exc.value.log, str) and exc.value.log
