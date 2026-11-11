@@ -19,9 +19,17 @@ from universum.config import (
     Volume,
     is_localhost_url,
     mask_key,
+    normalize_api_key,
 )
 from universum.file_parser import parse_file
-from universum.llm_client import build_payload, effective_max_tokens, friendly_http_error, friendly_network_error
+from universum.llm_client import (
+    LlmClient,
+    auth_headers,
+    build_payload,
+    effective_max_tokens,
+    friendly_http_error,
+    friendly_network_error,
+)
 from universum.prompts import (
     SYSTEM_PROMPT,
     build_generation_prompt,
@@ -260,3 +268,87 @@ def test_orchestrator_mocked(tmp_path, monkeypatch):
     result = orch.generate(req)
     assert result.pdf_path.exists()
     assert result.latex_code == SAMPLE_TEX.strip()
+
+
+# ---------------------------------------------------------------------------
+# Авторизация: ключ должен реально уходить в запрос (фикс HTTP 401)
+# ---------------------------------------------------------------------------
+
+def test_key_is_sent_to_pollinations():
+    """Регресс: для провайдера Pollinations ключ раньше не отправлялся -> 401."""
+    s = LlmSettings(provider=LlmProvider.POLLINATIONS, api_key="sk-testkey12345")
+    cfg = LlmConfig.from_settings(s)
+    url, model, send_key = cfg.endpoints[0]
+    assert "gen.pollinations.ai" in url
+    assert send_key is True
+    assert auth_headers(url, cfg.api_key, send_key) == {"Authorization": "Bearer sk-testkey12345"}
+
+
+def test_key_not_sent_to_ollama():
+    s = LlmSettings(provider=LlmProvider.OLLAMA, api_key="sk-testkey12345")
+    cfg = LlmConfig.from_settings(s)
+    url, _model, send_key = cfg.endpoints[0]
+    assert send_key is False
+    assert auth_headers(url, cfg.api_key, send_key) == {}
+
+
+def test_normalize_api_key():
+    assert normalize_api_key("  sk-abc123  ") == "sk-abc123"
+    assert normalize_api_key('"sk-abc123"') == "sk-abc123"
+    assert normalize_api_key("Bearer sk-abc123") == "sk-abc123"
+    assert normalize_api_key("bearer   sk-abc123") == "sk-abc123"
+    assert normalize_api_key("sk-abc\n123") == "sk-abc123"  # перенос строки при копировании
+    assert normalize_api_key("") == ""
+    assert normalize_api_key(None) == ""
+
+
+def test_key_normalized_in_settings_and_client():
+    s = LlmSettings(provider=LlmProvider.POLLINATIONS, api_key="Bearer  sk-abc123\n")
+    cfg = LlmConfig.from_settings(s)
+    assert cfg.api_key == "sk-abc123"
+    assert auth_headers(cfg.primary_url, cfg.api_key, True)["Authorization"] == "Bearer sk-abc123"
+
+
+def test_401_message_explains_missing_key():
+    msg = friendly_http_error(401, "unauthorized", key_sent=False, url="https://gen.pollinations.ai/v1/chat/completions")
+    assert "не отправило" in msg
+    msg2 = friendly_http_error(401, "unauthorized", key_sent=True, url="https://gen.pollinations.ai/v1/chat/completions")
+    assert "отправлен" in msg2
+    assert "enter.pollinations.ai" in msg2  # подсказка, где взять ключ
+
+
+def test_401_is_not_retried(monkeypatch):
+    """401 не должен повторяться 3 раза — сразу переходим к следующему эндпоинту."""
+    from universum.utils import LlmError
+
+    cfg = LlmConfig(provider=LlmProvider.POLLINATIONS, api_key="sk-bad", max_retries=3, retry_backoff_sec=0)
+    client = LlmClient(cfg)
+    calls: list[dict] = []
+
+    def fake_post(url, payload, headers, timeout=None):
+        calls.append(headers)
+        err = LlmError(friendly_http_error(401, "unauthorized", key_sent=bool(headers.get("Authorization")), url=url))
+        err.retryable = False
+        raise err
+
+    monkeypatch.setattr(client, "_post_with_headers", fake_post)
+    with pytest.raises(LlmError) as exc:
+        client.generate("sys", "user")
+    # Primary Pollinations — ровно одна попытка, ключ в заголовке присутствовал
+    assert len(calls) == 1 + 1  # primary (1 попытка) + ollama (1 попытка)
+    assert calls[0].get("Authorization") == "Bearer sk-bad"
+    assert "401" in str(exc.value)
+
+
+def test_generate_sends_authorization_header(monkeypatch):
+    cfg = LlmConfig(provider=LlmProvider.POLLINATIONS, api_key="sk-ok", max_retries=1, retry_backoff_sec=0)
+    client = LlmClient(cfg)
+    seen: list[dict] = []
+
+    def fake_post(url, payload, headers, timeout=None):
+        seen.append(headers)
+        return {"choices": [{"message": {"content": "\\documentclass{article}"}}]}
+
+    monkeypatch.setattr(client, "_post_with_headers", fake_post)
+    assert client.generate("sys", "user")
+    assert seen[0]["Authorization"] == "Bearer sk-ok"
