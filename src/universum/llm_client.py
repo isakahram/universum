@@ -1,7 +1,12 @@
-"""LLM-клиент: Pollinations (без ключа) + провайдеры с ключом + Ollama fallback.
+"""LLM-клиент: Pollinations (gen.pollinations.ai) + провайдеры с ключом + Ollama.
 
 Реализован на стандартной библиотеке urllib (без внешних зависимостей),
 с retry, таймаутами и цепочкой эндпоинтов. OpenAI-совместимый формат.
+
+Pollinations: строго https://gen.pollinations.ai/v1/chat/completions,
+модель openai, max_tokens НЕ отправляется (сервер сам решает лимит).
+Старый text.pollinations.ai с max_tokens=8192 отвечал 400
+output_token_limit_exceeded даже на 1 страницу — поэтому лимит убран.
 
 Ключ отправляется только на удалённый эндпоинт (не на localhost) и никогда
 не пишется в логи (только замаскированный вид).
@@ -15,10 +20,31 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
-from .config import LlmConfig, get_config, mask_key
+from .config import LlmConfig, get_config, is_pollinations_url, mask_key
 from .utils import LlmError, get_logger, log_event
 
 ProgressFn = Callable[[str], None]
+
+
+def effective_max_tokens(url: str, configured: int | None) -> int | None:
+    """Определить max_tokens для запроса.
+
+    Для Pollinations всегда None (не отправлять — сервер сам решает,
+    иначе 400 output_token_limit_exceeded). Для остальных — как настроено
+    (None = не отправлять).
+
+    Args:
+        url: URL эндпоинта.
+        configured: Настроенное значение (None = не отправлять).
+
+    Returns:
+        Значение для payload или None (не включать в payload).
+    """
+    if is_pollinations_url(url):
+        return None
+    if configured is None or configured <= 0:
+        return None
+    return configured
 
 
 def friendly_network_error(reason: object, url: str = "") -> str:
@@ -56,6 +82,13 @@ def friendly_network_error(reason: object, url: str = "") -> str:
 def friendly_http_error(code: int, detail: str) -> str:
     """Перевести HTTP-ошибку провайдера в понятное сообщение."""
     d = (detail or "")[:300]
+    low = (detail or "").lower()
+    if "output_token_limit_exceeded" in low or "token_limit" in low:
+        return (
+            "Сервер ограничил объём ответа (output_token_limit_exceeded). "
+            "Попробуйте уменьшить объём документа (меньше страниц/вопросов) "
+            "или выбрать другой провайдер в «Настройках нейросети»."
+        )
     if code in (401, 403):
         return (
             f"Провайдер отклонил ключ (HTTP {code}). Проверьте, что ключ верный и не отозван, "
@@ -92,6 +125,26 @@ def _extract_content(response: dict) -> str:
         raise
     except Exception as e:
         raise LlmError(f"Не удалось разобрать ответ LLM: {e}") from e
+
+
+def build_payload(model: str, system_prompt: str, user_prompt: str, url: str, config: LlmConfig) -> dict:
+    """Собрать payload для OpenAI-совместимого chat/completions.
+
+    max_tokens включается только если effective_max_tokens() вернул значение
+    (для Pollinations — никогда).
+    """
+    payload: dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": config.temperature,
+    }
+    mt = effective_max_tokens(url, config.max_tokens)
+    if mt is not None:
+        payload["max_tokens"] = mt
+    return payload
 
 
 class LlmClient:
@@ -131,15 +184,7 @@ class LlmClient:
                 progress(f"Запрос к нейросети ({model})…")
             # Ключ в лог не пишем — только замаскированный вид
             log_event(f"LLM request url={url} model={model} key={mask_key(self.config.api_key) if send_key else 'no-key'} prompt_chars={len(user_prompt)}")
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": self.config.temperature,
-                "max_tokens": self.config.max_tokens,
-            }
+            payload = build_payload(model, system_prompt, user_prompt, url, self.config)
             headers: dict[str, str] = {}
             if send_key and self.config.api_key.strip():
                 headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
@@ -179,12 +224,14 @@ class LlmClient:
         if not endpoints:
             return False, "Нет настроенных эндпоинтов."
         url, model, send_key = endpoints[0]
-        payload = {
+        payload: dict = {
             "model": model,
             "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
             "temperature": 0,
         }
+        # Для Pollinations max_tokens не отправляем; для остальных — 1 (быстрый тест)
+        if not is_pollinations_url(url):
+            payload["max_tokens"] = 1
         headers: dict[str, str] = {}
         if send_key and self.config.api_key.strip():
             headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
