@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
-from .config import LlmConfig, get_config, is_pollinations_url, mask_key
+from .config import LlmConfig, get_config, is_localhost_url, is_pollinations_url, mask_key, normalize_api_key
 from .utils import LlmError, get_logger, log_event
 
 ProgressFn = Callable[[str], None]
@@ -79,8 +79,15 @@ def friendly_network_error(reason: object, url: str = "") -> str:
     return f"Сеть недоступна: {text[:300]}"
 
 
-def friendly_http_error(code: int, detail: str) -> str:
-    """Перевести HTTP-ошибку провайдера в понятное сообщение."""
+def friendly_http_error(code: int, detail: str, *, key_sent: bool | None = None, url: str = "") -> str:
+    """Перевести HTTP-ошибку провайдера в понятное сообщение.
+
+    Args:
+        code: HTTP-код.
+        detail: Тело ответа сервера (обрезается).
+        key_sent: Был ли реально отправлен заголовок Authorization.
+        url: URL эндпоинта (для подсказки про Pollinations).
+    """
     d = (detail or "")[:300]
     low = (detail or "").lower()
     if "output_token_limit_exceeded" in low or "token_limit" in low:
@@ -90,9 +97,23 @@ def friendly_http_error(code: int, detail: str) -> str:
             "или выбрать другой провайдер в «Настройках нейросети»."
         )
     if code in (401, 403):
+        if key_sent is False:
+            return (
+                f"Провайдер требует ключ, но приложение его не отправило (HTTP {code}). "
+                "Откройте «Настройки нейросети», вставьте ключ и нажмите «Сохранить», "
+                f"затем «Проверить соединение». Ответ сервера: {d}"
+            )
+        extra = ""
+        if is_pollinations_url(url):
+            extra = (
+                " Для Pollinations ключ должен быть из https://enter.pollinations.ai "
+                "(начинается с sk_ или pk_) и передаваться в заголовке Authorization. "
+            )
+        hint = "Ключ был отправлен. " if key_sent else ""
         return (
-            f"Провайдер отклонил ключ (HTTP {code}). Проверьте, что ключ верный и не отозван, "
-            f"и что URL соответствует провайдеру. Ответ сервера: {d}"
+            f"Провайдер отклонил ключ (HTTP {code}). {hint}{extra}"
+            f"Проверьте, что ключ верный, не отозван и что URL соответствует провайдеру. "
+            f"Ответ сервера: {d}"
         )
     if code == 404:
         return (
@@ -147,6 +168,26 @@ def build_payload(model: str, system_prompt: str, user_prompt: str, url: str, co
     return payload
 
 
+def auth_headers(url: str, api_key: str, send_key: bool) -> dict[str, str]:
+    """Собрать заголовок Authorization для эндпоинта.
+
+    Ключ нормализуется (без «Bearer », кавычек, пробелов), на localhost
+    не отправляется никогда.
+
+    Args:
+        url: URL эндпоинта.
+        api_key: Ключ из настроек.
+        send_key: Разрешено ли отправлять ключ на этот эндпоинт.
+
+    Returns:
+        Заголовки для запроса (пустой словарь, если ключ не нужен).
+    """
+    key = normalize_api_key(api_key)
+    if not (send_key and key) or is_localhost_url(url):
+        return {}
+    return {"Authorization": f"Bearer {key}"}
+
+
 class LlmClient:
     """Клиент нейросети с retry и fallback-цепочкой. Поддерживает API-ключ."""
 
@@ -182,12 +223,14 @@ class LlmClient:
                 raise LlmError("Генерация отменена пользователем.")
             if progress:
                 progress(f"Запрос к нейросети ({model})…")
-            # Ключ в лог не пишем — только замаскированный вид
-            log_event(f"LLM request url={url} model={model} key={mask_key(self.config.api_key) if send_key else 'no-key'} prompt_chars={len(user_prompt)}")
             payload = build_payload(model, system_prompt, user_prompt, url, self.config)
-            headers: dict[str, str] = {}
-            if send_key and self.config.api_key.strip():
-                headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
+            headers = auth_headers(url, self.config.api_key, send_key)
+            # Ключ в лог не пишем — только факт отправки и замаскированный вид
+            log_event(
+                f"LLM request url={url} model={model} "
+                f"auth={'sent ' + mask_key(self.config.api_key) if headers else 'none'} "
+                f"prompt_chars={len(user_prompt)}"
+            )
             endpoint_error = ""
             for attempt in range(1, self.config.max_retries + 1):
                 if cancel_event is not None and cancel_event.is_set():
@@ -199,7 +242,13 @@ class LlmClient:
                     return content
                 except LlmError as e:
                     endpoint_error = str(e)
-                    self.logger.warning("LLM attempt %d/%d failed url=%s: %s", attempt, self.config.max_retries, url, e)
+                    retryable = getattr(e, "retryable", True)
+                    self.logger.warning(
+                        "LLM attempt %d/%d failed url=%s retryable=%s: %s",
+                        attempt, self.config.max_retries, url, retryable, e,
+                    )
+                    if not retryable:
+                        break  # 400/401/403/404 — повтор не поможет
                     if attempt < self.config.max_retries:
                         time.sleep(self.config.retry_backoff_sec * attempt)
             if endpoint_error:
@@ -232,18 +281,26 @@ class LlmClient:
         # Для Pollinations max_tokens не отправляем; для остальных — 1 (быстрый тест)
         if not is_pollinations_url(url):
             payload["max_tokens"] = 1
-        headers: dict[str, str] = {}
-        if send_key and self.config.api_key.strip():
-            headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
+        headers = auth_headers(url, self.config.api_key, send_key)
         try:
             result = self._post_with_headers(url, payload, headers, timeout=timeout)
             _extract_content(result)
-            return True, f"Соединение OK: {url} ({model}). Ключ: {mask_key(self.config.api_key) if send_key else 'не требуется'}."
+            auth_state = (
+                f"ключ {mask_key(self.config.api_key)} отправлен"
+                if headers
+                else ("ключ не требуется" if not self.config.api_key else "ключ НЕ отправлялся")
+            )
+            return True, f"Соединение OK: {url} ({model}). {auth_state}."
         except LlmError as e:
             return False, str(e)
 
     def _post_with_headers(self, url: str, payload: dict, headers: dict[str, str], timeout: int | None = None) -> dict:
-        """POST с дополнительными заголовками (Authorization — только если передан)."""
+        """POST с дополнительными заголовками (Authorization — только если передан).
+
+        Raises:
+            LlmError: С сообщением на русском; у ошибок HTTP 400/401/403/404
+                выставляется retryable=False (повтор не поможет).
+        """
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req_headers = {"Content-Type": "application/json", "User-Agent": "Universum/1.0", **headers}
         req = urllib.request.Request(url, data=data, headers=req_headers, method="POST")
@@ -257,7 +314,9 @@ class LlmClient:
                 detail = e.read().decode("utf-8", errors="replace")[:500]
             except Exception:
                 pass
-            raise LlmError(friendly_http_error(e.code, detail)) from e
+            err = LlmError(friendly_http_error(e.code, detail, key_sent=bool(headers.get("Authorization")), url=url))
+            err.retryable = e.code not in (400, 401, 403, 404)  # type: ignore[attr-defined]
+            raise err from e
         except urllib.error.URLError as e:
             raise LlmError(friendly_network_error(e.reason, url)) from e
         except TimeoutError as e:

@@ -95,7 +95,7 @@ class LlmProvider(str, Enum):
     @property
     def label_ru(self) -> str:
         return {
-            LlmProvider.POLLINATIONS: "Pollinations (бесплатно, без ключа)",
+            LlmProvider.POLLINATIONS: "Pollinations (бесплатный ключ, gen.pollinations.ai)",
             LlmProvider.OPENAI: "OpenAI (нужен ключ)",
             LlmProvider.OPENROUTER: "OpenRouter (нужен ключ)",
             LlmProvider.DEEPSEEK: "DeepSeek (нужен ключ)",
@@ -150,10 +150,32 @@ def mask_key(key: str) -> str:
     """Замаскировать ключ для логов/GUI: 'sk-...abcd' (никогда не показывать целиком)."""
     if not key:
         return "(не задан)"
-    k = key.strip()
+    k = normalize_api_key(key)
+    if not k:
+        return "(не задан)"
     if len(k) <= 8:
         return "***"
     return f"{k[:3]}...{k[-4:]}"
+
+
+def normalize_api_key(key: str) -> str:
+    """Очистить API-ключ от «мусора», который ломает авторизацию (HTTP 401).
+
+    Убирает обрамляющие кавычки и пробелы, префикс «Bearer » (если ключ
+    скопировали из curl-команды), а также все внутренние пробелы, табуляции
+    и переводы строк — частая причина 401 при рабочем ключе.
+
+    Args:
+        key: Ключ в том виде, в каком его вставили в GUI/env.
+
+    Returns:
+        Ключ без лишних символов (пустая строка, если ключа нет).
+    """
+    k = (key or "").strip().strip('"').strip("'").strip()
+    if k.lower().startswith("bearer "):
+        k = k[7:].strip()
+    # Убираем любые пробельные символы внутри (переносы строк при копировании)
+    return "".join(k.split())
 
 
 def is_localhost_url(url: str) -> bool:
@@ -211,6 +233,10 @@ class LlmSettings:
         preset = PROVIDER_PRESETS.get(self.provider, {})
         return migrate_pollinations_model(str(preset.get("model", "")))
 
+    def resolved_api_key(self) -> str:
+        """Ключ, очищенный от пробелов/кавычек/префикса Bearer."""
+        return normalize_api_key(self.api_key)
+
     def __repr__(self) -> str:  # ключ никогда не попадает в repr/логи
         return f"LlmSettings(provider={self.provider.value}, url={self.resolved_url()!r}, model={self.resolved_model()!r}, api_key={mask_key(self.api_key)})"
 
@@ -220,7 +246,7 @@ def load_llm_settings() -> LlmSettings:
     # 1. Переменные окружения имеют наивысший приоритет
     env_url = os.getenv("UNIVERSUM_LLM_URL", "").strip()
     env_model = os.getenv("UNIVERSUM_LLM_MODEL", "").strip()
-    env_key = os.getenv("UNIVERSUM_LLM_KEY", "").strip()
+    env_key = normalize_api_key(os.getenv("UNIVERSUM_LLM_KEY", ""))
     if env_url or env_model or env_key:
         provider = LlmProvider.CUSTOM if env_url else LlmProvider.POLLINATIONS
         return LlmSettings(provider=provider, url=env_url, model=env_model, api_key=env_key)
@@ -228,7 +254,7 @@ def load_llm_settings() -> LlmSettings:
     try:
         import keyring  # type: ignore
 
-        key = keyring.get_password("universum", "llm_api_key") or ""
+        key = normalize_api_key(keyring.get_password("universum", "llm_api_key") or "")
         if key:
             # URL/модель берём из файла, ключ — из keyring
             file_settings = _load_settings_file()
@@ -254,7 +280,7 @@ def _load_settings_file() -> LlmSettings:
             provider=provider,
             url=str(data.get("url", "")),
             model=str(data.get("model", "")),
-            api_key=str(data.get("api_key", "")),
+            api_key=normalize_api_key(str(data.get("api_key", ""))),
         )
     except Exception:
         return LlmSettings()
@@ -270,24 +296,30 @@ def save_llm_settings(settings: LlmSettings) -> None:
 
     settings_dir().mkdir(parents=True, exist_ok=True)
     path = settings_dir() / "settings.json"
+    key = normalize_api_key(settings.api_key)
     saved_key = ""
     # Пробуем keyring
     key_saved_to_keyring = False
-    if settings.api_key.strip():
+    if key:
         try:
             import keyring  # type: ignore
 
-            keyring.set_password("universum", "llm_api_key", settings.api_key.strip())
-            key_saved_to_keyring = True
+            keyring.set_password("universum", "llm_api_key", key)
+            # Проверяем, что ключ реально читается обратно (на Linux без
+            # backend keyring молча «сохраняет» и возвращает None -> 401).
+            if normalize_api_key(keyring.get_password("universum", "llm_api_key") or "") == key:
+                key_saved_to_keyring = True
         except Exception:
             key_saved_to_keyring = False
     if not key_saved_to_keyring:
-        saved_key = settings.api_key.strip()
+        # Fallback: файл с правами 0600
+        saved_key = key
     data = {
         "provider": settings.provider.value,
         "url": settings.url.strip(),
         "model": settings.model.strip(),
         "api_key": saved_key,
+        "key_in_keyring": key_saved_to_keyring,
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     # Ограничить права (на Windows — best effort)
@@ -310,7 +342,7 @@ class LlmConfig:
     ollama_url: str = "http://localhost:11434/v1/chat/completions"
     ollama_model: str = "llama3.1:8b"
     model: str = field(default_factory=lambda: migrate_pollinations_model(os.getenv("UNIVERSUM_LLM_MODEL", POLLINATIONS_MODEL)))
-    api_key: str = field(default_factory=lambda: os.getenv("UNIVERSUM_LLM_KEY", ""))
+    api_key: str = field(default_factory=lambda: normalize_api_key(os.getenv("UNIVERSUM_LLM_KEY", "")))
     custom_url: str = field(default_factory=lambda: migrate_pollinations_url(os.getenv("UNIVERSUM_LLM_URL", "")))
     provider: LlmProvider = LlmProvider.POLLINATIONS
     timeout_sec: int = 180
@@ -330,14 +362,14 @@ class LlmConfig:
             return cls(
                 primary_url=url or POLLINATIONS_URL,
                 model=model or POLLINATIONS_MODEL,
-                api_key=settings.api_key.strip(),
+                api_key=settings.resolved_api_key(),
                 provider=settings.provider,
             )
         return cls(
             primary_url=POLLINATIONS_URL,
             custom_url=url,
             model=model,
-            api_key=settings.api_key.strip(),
+            api_key=settings.resolved_api_key(),
             provider=settings.provider,
         )
 
@@ -348,14 +380,14 @@ class LlmConfig:
         send_key=True только для удалённых эндпоинтов с ключом (не для localhost).
         """
         chain: list[tuple[str, str, bool]] = []
-        has_key = bool(self.api_key.strip())
+        has_key = bool(normalize_api_key(self.api_key))
         if self.custom_url:
             chain.append((self.custom_url, self.model, has_key and not is_localhost_url(self.custom_url)))
-        # Primary: ключ шлём только если провайдер требует и это не localhost
-        primary_send_key = has_key and self.provider not in (LlmProvider.POLLINATIONS, LlmProvider.OLLAMA) and not is_localhost_url(self.primary_url)
-        # Если primary — Pollinations без ключа, ключ не нужен
-        if self.provider == LlmProvider.POLLINATIONS:
-            primary_send_key = False
+        # Primary: ключ шлём всегда, если он задан и эндпоинт не localhost.
+        # ВАЖНО: gen.pollinations.ai требует ключ (sk_/pk_) — раньше для
+        # провайдера Pollinations ключ принудительно не отправлялся, из-за чего
+        # сервер отвечал 401, хотя ключ рабочий.
+        primary_send_key = has_key and not is_localhost_url(self.primary_url)
         chain.append((self.primary_url, self.model, primary_send_key))
         # Ollama всегда без ключа
         chain.append((self.ollama_url, self.ollama_model, False))

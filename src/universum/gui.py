@@ -22,8 +22,10 @@ from .config import (
     LlmSettings,
     Style,
     Volume,
+    is_localhost_url,
     load_llm_settings,
     mask_key,
+    normalize_api_key,
     save_llm_settings,
 )
 from .llm_client import LlmClient
@@ -273,11 +275,31 @@ class UniversumApp(tk.Tk):
 
         ttk.Label(
             form,
-            text="Ключ хранится в системном хранилище (Credential Manager/Keychain) или ~/.universum/ с правами 0600.\nОн никогда не попадает в репозиторий и логи. Для Pollinations/Ollama ключ не нужен.",
+            text=(
+                "Ключ хранится в системном хранилище (Credential Manager/Keychain) или ~/.universum/ с правами 0600.\n"
+                "Он никогда не попадает в репозиторий и логи.\n"
+                "Pollinations (gen.pollinations.ai) требует ключ: вставьте его как есть, без слова Bearer и кавычек —\n"
+                "лишние пробелы/переносы строк очищаются автоматически. Для локального Ollama ключ не нужен."
+            ),
             foreground="gray",
             font=("TkDefaultFont", 8),
             wraplength=500,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 4))
+
+        def _key_state_text() -> str:
+            """Текст о том, уйдёт ли ключ на выбранный эндпоинт."""
+            key = normalize_api_key(key_var.get())
+            if not key:
+                return "Ключ не задан — для Pollinations запрос вернёт 401."
+            if is_localhost_url(url_var.get() or str(PROVIDER_PRESETS.get(_collect_provider(), {}).get("url", ""))):
+                return f"Ключ {mask_key(key)} задан, но на localhost не отправляется (так и нужно)."
+            return f"Ключ {mask_key(key)} будет отправлен в заголовке Authorization."
+
+        def _collect_provider() -> LlmProvider:
+            for p in LlmProvider:
+                if p.label_ru == provider_var.get():
+                    return p
+            return LlmProvider.POLLINATIONS
 
         status_var = tk.StringVar(value=f"Текущий ключ: {mask_key(settings.api_key)}")
         ttk.Label(form, textvariable=status_var, foreground="gray", font=("TkDefaultFont", 8)).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
@@ -293,22 +315,33 @@ class UniversumApp(tk.Tk):
                     if not model_var.get().strip():
                         model_var.set(str(preset.get("model", "")))
                     break
+            _refresh_key_state()
 
         provider_combo.bind("<<ComboboxSelected>>", _on_provider_changed)
 
         def _collect() -> LlmSettings:
-            provider = LlmProvider.POLLINATIONS
-            for p in LlmProvider:
-                if p.label_ru == provider_var.get():
-                    provider = p
-                    break
-            return LlmSettings(provider=provider, url=url_var.get().strip(), model=model_var.get().strip(), api_key=key_var.get().strip())
+            return LlmSettings(
+                provider=_collect_provider(),
+                url=url_var.get().strip(),
+                model=model_var.get().strip(),
+                api_key=key_var.get().strip(),
+            )
+
+        # Живой статус: уйдёт ли ключ на выбранный эндпоинт (частая причина 401 —
+        # ключ введён, но в запрос не попадает).
+        def _refresh_key_state(*_args) -> None:
+            status_var.set(_key_state_text())
+
+        key_var.trace_add("write", _refresh_key_state)
+        url_var.trace_add("write", _refresh_key_state)
+        _refresh_key_state()
 
         def _on_save() -> None:
             try:
-                save_llm_settings(_collect())
+                saved = _collect()
+                save_llm_settings(saved)
                 self.orchestrator.reload_llm_config()
-                status_var.set(f"Сохранено. Ключ: {mask_key(key_var.get().strip())}")
+                status_var.set(f"Сохранено. {_key_state_text()}")
                 messagebox.showinfo("Universum", "Настройки сохранены.")
             except Exception as e:
                 messagebox.showerror("Universum", f"Не удалось сохранить настройки: {e}")
@@ -317,7 +350,12 @@ class UniversumApp(tk.Tk):
             status_var.set("Проверка соединения…")
             win.update_idletasks()
             s = _collect()
-            client = LlmClient(LlmConfig.from_settings(s))
+            cfg = LlmConfig.from_settings(s)
+            # Если ключ введён, но не сохранён — сообщаем явно, а не молча тестируем без него
+            if normalize_api_key(s.api_key) and not cfg.api_key:
+                status_var.set("Ключ не попал в конфиг — нажмите «Сохранить» и повторите.")
+                return
+            client = LlmClient(cfg)
             ok, msg = client.test_connection()
             status_var.set(msg)
             if ok:
