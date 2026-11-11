@@ -461,3 +461,120 @@ def test_compile_with_repair_raises_with_string_log(monkeypatch):
     with pytest.raises(LatexCompileError) as exc:
         lc.compile_with_repair("x", lambda s, u: "y", config=Cfg())
     assert isinstance(exc.value.log, str) and exc.value.log
+
+
+# ---------------------------------------------------------------------------
+# Запрет внутренних @-макросов LaTeX (You can't use \spacefactor ...)
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_forbids_at_macros():
+    from universum.prompts import SYSTEM_PROMPT
+
+    assert r"\@" in SYSTEM_PROMPT
+    assert "makeatletter" in SYSTEM_PROMPT
+    assert "spacefactor" in SYSTEM_PROMPT
+    assert r"\maketitle" in SYSTEM_PROMPT
+    assert r"\title{" in SYSTEM_PROMPT
+    assert "НИКОГДА" in SYSTEM_PROMPT
+
+
+def test_style_prompts_forbid_at_macros():
+    from universum.prompts import STYLE_BLOCKS
+
+    for style, block in STYLE_BLOCKS.items():
+        assert r"\@" in block, style
+        assert "maketitle" in block, style
+
+
+def test_lecture_and_repair_prompt_mention_title_rules():
+    from universum.prompts import DOCTYPE_LECTURE, build_repair_prompt
+
+    assert r"\maketitle" in DOCTYPE_LECTURE
+    assert "makeatletter" in DOCTYPE_LECTURE
+
+    repair = build_repair_prompt("\\documentclass{article}", "! You can't use \\spacefactor in internal vertical mode")
+    assert "spacefactor" in repair
+    assert "maketitle" in repair
+
+
+def test_sanitize_latex_removes_at_macros():
+    from universum.utils import sanitize_latex
+
+    code = (
+        "\\documentclass{article}\n"
+        "\\title{Тема}\\author{Автор}\\date{2026}\n"
+        "\\makeatletter\n"
+        "\\def\\@maketitle{\\hbox{\\@title}}\n"
+        "\\makeatother\n"
+        "\\begin{document}\n"
+        "{\\Large \\@title}\n"
+        "\\@author, \\@date\n"
+        "\\spacefactor1000\n"
+        "почта: user@example.com\n"
+        "\\end{document}"
+    )
+    clean = sanitize_latex(code)
+    assert r"\@" not in clean
+    assert "makeatletter" not in clean
+    assert "spacefactor" not in clean
+    # значения из преамбулы подставлены вместо \@title и т.п.
+    assert "Тема" in clean and "Автор" in clean and "2026" in clean
+    # обычный @ в тексте не тронут
+    assert "user@example.com" in clean
+
+
+def test_sanitize_latex_handles_none_and_plain():
+    from universum.utils import sanitize_latex
+
+    assert sanitize_latex("") == ""
+    assert sanitize_latex(None) == ""  # type: ignore[arg-type]
+    txt = "\\documentclass{article}\\begin{document}x\\end{document}"
+    assert sanitize_latex(txt) == txt
+
+
+def test_validate_flags_at_macros():
+    from universum.utils import validate_latex
+
+    problems = validate_latex("\\documentclass{article}\\begin{document}\\@title\\end{document}")
+    assert any("макрос" in p.lower() for p in problems)
+
+
+def test_extract_latex_sanitizes_at_macros():
+    from universum.utils import extract_latex
+
+    raw = "```latex\n\\documentclass{article}\n\\begin{document}\n\\maketitle\\@\\@title\n\\end{document}\n```"
+    out = extract_latex(raw)
+    assert r"\@" not in out
+    assert "\\begin{document}" in out
+
+
+def test_compile_latex_sanitizes_before_engine(monkeypatch):
+    """Даже если код пришёл в обход extract_latex, движок не увидит \\@."""
+    import universum.latex_compiler as lc
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(lc, "find_engine", lambda preference: "tectonic")
+
+    def fake_run(cmd, cwd=None, **kwargs):
+        from pathlib import Path
+
+        captured["tex"] = Path(cwd, "document.tex").read_text(encoding="utf-8")
+        p = lc.CompileResult  # noqa: F841 — просто для читаемости
+        raise RuntimeError("останавливаемся после чтения файла")
+
+    monkeypatch.setattr(lc, "subprocess", type("S", (), {"run": staticmethod(fake_run), "TimeoutExpired": Exception, "DEVNULL": -3}))
+    result = lc.compile_latex("\\documentclass{article}\\begin{document}\\@title\\end{document}")
+    assert r"\@" not in captured["tex"]
+    assert result.success is False
+    assert isinstance(result.log, str)
+
+
+def test_prompts_have_no_double_backslashes():
+    """В промтах не должно быть «\\\\@» / «\\\\title» — модели увидят лишнюю косую."""
+    from universum.prompts import DOCTYPE_BLOCKS, STYLE_BLOCKS, SYSTEM_PROMPT, REPAIR_PROMPT_TEMPLATE
+
+    texts = [SYSTEM_PROMPT, REPAIR_PROMPT_TEMPLATE, *STYLE_BLOCKS.values(), *DOCTYPE_BLOCKS.values()]
+    for text in texts:
+        assert "\\\\@" not in text
+        assert "\\\\maketitle" not in text
+        assert "\\\\title{" not in text

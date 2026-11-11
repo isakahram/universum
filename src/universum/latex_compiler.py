@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import LatexConfig, get_config
-from .utils import LatexCompileError, get_logger, log_event
+from .utils import LatexCompileError, get_logger, log_event, sanitize_latex
 
 ProgressFn = Callable[[str], None]
 
@@ -227,6 +227,9 @@ def _compile_latex_impl(
     """Внутренняя реализация компиляции (см. :func:`compile_latex`)."""
     cfg = config or get_config().latex
     logger = get_logger()
+    # Последняя страховка: внутренние @-макросы (\\@, \\makeatletter) ломают
+    # Tectonic с «You can't use \spacefactor in internal vertical mode».
+    latex_code = sanitize_latex(latex_code)
     workdir = Path(tempfile.mkdtemp(prefix="universum_latex_"))
     tex_file = workdir / "document.tex"
     tex_file.write_text(latex_code, encoding="utf-8")

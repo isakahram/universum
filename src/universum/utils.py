@@ -86,7 +86,67 @@ def extract_latex(raw: str) -> str:
     end_idx = text.find(r"\end{document}")
     if end_idx != -1:
         text = text[: end_idx + len(r"\end{document}")]
-    return text.strip()
+    # Убрать @-макросы ядра (частая причина падения Tectonic)
+    return sanitize_latex(text.strip())
+
+
+_MAKEATLETTER_BLOCK_RE = re.compile(r"\\makeatletter.*?\\makeatother", re.DOTALL)
+_MAKEATLETTER_RE = re.compile(r"\\(?:makeatletter|makeatother)\b")
+_AT_MACRO_RE = re.compile(r"\\@+")
+_SPACEFACTOR_RE = re.compile(r"\\spacefactor\s*\d*")
+# \@title / \@author / \@date: подменяем значением из преамбулы, чтобы не
+# оставлять в тексте «голое» слово title/author/date
+_AT_FIELD_RE = re.compile(r"\\@(title|author|date)\b")
+_FIELD_RE = {
+    "title": re.compile(r"\\title\s*\{([^{}]*)\}"),
+    "author": re.compile(r"\\author\s*\{([^{}]*)\}"),
+    "date": re.compile(r"\\date\s*\{([^{}]*)\}"),
+}
+
+
+def sanitize_latex(code: str) -> str:
+    """Убрать внутренние макросы LaTeX (@-команды), ломающие компиляцию.
+
+    Модель иногда использует внутренние макросы ядра (``\\@``, ``\\@title``,
+    ``\\makeatletter``), из-за чего Tectonic падает с
+    ``You can't use \\spacefactor in internal vertical mode``. Промт это
+    запрещает, но здесь мы гарантируем результат: такие конструкции
+    вырезаются до компиляции.
+
+    Args:
+        code: LaTeX-код (может быть None/пустым).
+
+    Returns:
+        Очищенный LaTeX-код (всегда строка).
+    """
+    text = "" if code is None else str(code)
+    if not text:
+        return ""
+    original = text
+    removed = 0
+    # 0. \@title / \@author / \@date -> значение из преамбулы (или пусто),
+    #    иначе после вырезания "\@" остаётся «голое» слово title/author/date.
+    fields = {name: (m.group(1) if (m := rx.search(text)) else "") for name, rx in _FIELD_RE.items()}
+    text, n = _AT_FIELD_RE.subn(lambda m: fields.get(m.group(1), ""), text)
+    removed += n
+    # 1. Блоки \makeatletter ... \makeatother целиком (внутри — @-команды)
+    text, n = _MAKEATLETTER_BLOCK_RE.subn("", text)
+    removed += n
+    # 2. Одиночные \makeatletter / \makeatother
+    text, n = _MAKEATLETTER_RE.subn("", text)
+    removed += n
+    # 3. Сами @-команды: \@, \@@ (в т.ч. \@title -> остаётся текст "title")
+    text, n = _AT_MACRO_RE.subn("", text)
+    removed += n
+    # 4. \spacefactor (источник «You can't use \spacefactor…»)
+    text, n = _SPACEFACTOR_RE.subn("", text)
+    removed += n
+    if removed and text != original:
+        try:
+            get_logger().warning("Removed %d internal @-macro construct(s) from LaTeX", removed)
+        except Exception:  # pragma: no cover — логирование не должно ломать генерацию
+            pass
+    return text
 
 
 def validate_latex(code: str) -> list[str]:
@@ -125,6 +185,9 @@ def validate_latex(code: str) -> list[str]:
             problems.append(f"Запрещённый пакет '{pkg}' — удалите его (см. правила промта).")
     if r"\includegraphics" in code:
         problems.append("\\includegraphics без внешних файлов сломает компиляцию — удалите.")
+    # Внутренние макросы ядра: «You can't use \spacefactor in internal vertical mode»
+    if _AT_MACRO_RE.search(code) or _MAKEATLETTER_RE.search(code):
+        problems.append("Внутренние @-макросы (\\@, \\makeatletter) ломают компиляцию — удалите их.")
     return problems
 
 

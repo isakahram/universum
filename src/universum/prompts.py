@@ -35,6 +35,8 @@ SYSTEM_PROMPT = """Ты — опытный преподаватель и экс�
 10. Язык документа = язык запроса пользователя (русский или английский). Заголовки, подписи, оглавление — на этом языке.
 11. Не оставляй плейсхолдеров вида [вставить сюда]. Каждый раздел должен содержать реальный содержательный текст.
 12. Проверь перед ответом: все \\begin{...} закрыты \\end{...}, нет незакрытых скобок, преамбула перед \\begin{document}.
+13. НИКОГДА не используй символ @ в командах LaTeX и внутренние макросы ядра: \\@, \\@@, \\@title, \\@date, \\@author, \\@startsection, \\makeatletter, \\makeatother, \\spacefactor. Это фатальная ошибка компиляции «You can't use \\spacefactor in internal vertical mode» — документ не соберётся.
+14. Титульный лист — ТОЛЬКО стандартными командами: в преамбуле \\title{...}, \\author{...}, \\date{...}, а в теле документа \\maketitle (при необходимости + \\thispagestyle{empty}). НИКОГДА не собирай титул вручную через \\@, \\hbox, \\vbox, \\vskip, \\def/\\newcommand с @ в имени.
 """
 
 # ---------------------------------------------------------------------------
@@ -64,7 +66,8 @@ STYLE_STRICT = """СТИЛЬ: СТРОГИЙ (академический).
 \\usepackage{float}
 \\usepackage{ragged2e}
 \\lstset{basicstyle=\\ttfamily\\small,breaklines=true,frame=single,numbers=left,numberstyle=\\tiny,tabsize=4,showstringspaces=false}
-Оформление: чёрно-белая гамма, serif-шрифт, строгая нумерация разделов (\\section, \\subsection), титульный лист, оглавление (\\tableofcontents), колонтитулы с номером страницы, аккуратные таблицы booktabs. Никаких цветных блоков и рамок tcolorbox. Заголовки — чёрные, без декоративные элементы."""
+Оформление: чёрно-белая гамма, serif-шрифт, строгая нумерация разделов (\\section, \\subsection), титульный лист, оглавление (\\tableofcontents), колонтитулы с номером страницы, аккуратные таблицы booktabs. Никаких цветных блоков и рамок tcolorbox. Заголовки — чёрные, без декоративные элементы.
+Титульный лист: ТОЛЬКО \\title{...}, \\author{...}, \\date{...} в преамбуле и \\maketitle в тексте (+ \\thispagestyle{empty}). НИКОГДА не используй \\@, \\makeatletter, \\makeatother и другие внутренние макросы."""
 
 STYLE_COLORFUL = """СТИЛЬ: КРАСОЧНЫЙ / КРЕАТИВНЫЙ.
 Преамбула (используй ровно этот набор):
@@ -93,7 +96,8 @@ STYLE_COLORFUL = """СТИЛЬ: КРАСОЧНЫЙ / КРЕАТИВНЫЙ.
 \\definecolor{accentcolor}{RGB}{230,126,34}
 \\definecolor{lightbg}{RGB}{235,243,252}
 \\lstset{basicstyle=\\ttfamily\\small,breaklines=true,frame=single,numbers=left,numberstyle=\\tiny,tabsize=4,showstringspaces=false,backgroundcolor=\\color{lightbg}}
-Оформление: цветные акценты (maincolor/accentcolor), ключевые определения и выводы — в tcolorbox (colback=lightbg, colframe=maincolor), заголовки разделов — цветные (\\titleformat с \\color{maincolor}), аккуратные цветные блоки, но без перегруза. Титульный лист с цветной плашкой, оглавление. Сохраняй читаемость: цвет — акцент, а не фон всего текста."""
+Оформление: цветные акценты (maincolor/accentcolor), ключевые определения и выводы — в tcolorbox (colback=lightbg, colframe=maincolor), заголовки разделов — цветные (\\titleformat с \\color{maincolor}), аккуратные цветные блоки, но без перегруза. Оглавление. Сохраняй читаемость: цвет — акцент, а не фон всего текста.
+Титульный лист: ТОЛЬКО стандартный \\title{...}/\\author{...}/\\date{...} + \\maketitle (\\thispagestyle{empty}); цветную плашку вокруг заголовка можно сделать tcolorbox. НИКОГДА не используй \\@, \\makeatletter, \\makeatother и другие внутренние макросы."""
 
 STYLE_PLAIN = """СТИЛЬ: БЕЗ СТИЛЯ (минимум оформления).
 Преамбула (используй ровно этот набор, ничего лишнего):
@@ -107,7 +111,8 @@ STYLE_PLAIN = """СТИЛЬ: БЕЗ СТИЛЯ (минимум оформлен�
 \\usepackage{listings}
 \\usepackage{hyperref}
 \\lstset{basicstyle=\\ttfamily\\small,breaklines=true,frame=single,tabsize=4,showstringspaces=false}
-Оформление: стандартный LaTeX без цветов, без tcolorbox, без fancyhdr, без titlesec. Простые \\section/\\subsection, стандартные списки, без титульного листа с декором (допустим простой \\title/\\maketitle или просто заголовок). Никаких цветных команд."""
+Оформление: стандартный LaTeX без цветов, без tcolorbox, без fancyhdr, без titlesec. Простые \\section/\\subsection, стандартные списки, без титульного листа с декором (допустим простой \\title/\\maketitle или просто заголовок). Никаких цветных команд.
+Титульный лист (если нужен): только \\title{...}/\\author{...}/\\date{...} + \\maketitle. НИКОГДА не используй \\@, \\makeatletter, \\makeatother."""
 
 STYLE_BLOCKS: dict[Style, str] = {
     Style.STRICT: STYLE_STRICT,
@@ -121,7 +126,7 @@ STYLE_BLOCKS: dict[Style, str] = {
 
 DOCTYPE_LECTURE = """ТИП ДОКУМЕНТА: ЛЕКЦИЯ.
 Структура (строго в этом порядке):
-1. Титульный лист: название темы (\\title), подзаголовок, дата, \\maketitle + \\thispagestyle{empty} где уместно.
+1. Титульный лист: \\title{...} (название темы), \\author{...}, \\date{...} в преамбуле, затем \\maketitle + \\thispagestyle{empty}. ЗАПРЕЩЕНО собирать титул вручную через \\@, \\@title, \\hbox/\\vbox, \\vskip, \\makeatletter.
 2. \\tableofcontents (если документ длинный).
 3. Введение (\\section*{Введение} или \\section{Введение}): актуальность темы, цели и задачи лекции, что студент будет знать/уметь после.
 4. Основные разделы: 3–5 логических разделов (или по структуре пользователя, если она задана). Каждый раздел: теория + примеры/кейсы + формулы/таблицы где уместно.
@@ -181,6 +186,7 @@ REPAIR_PROMPT_TEMPLATE = """Ты — эксперт по LaTeX. Ниже — LaT
 Правила исправления:
 - Исправляй только то, что ломает компиляцию. Не меняй содержание, структуру и стиль без необходимости.
 - Частые причины: незакрытые окружения (\\begin/\\end), незакрытые скобки/фигурные скобки, неэкранированные спецсимволы (& % $ # _), неизвестные пакеты/команды, ошибки в listings, неверный синтаксис таблиц.
+- Если в логе «You can't use \\spacefactor in internal vertical mode», «Undefined control sequence \\@» или упоминаются \\makeatletter/\\makeatother: удали ВСЕ \\@-конструкции (\\@, \\@@, \\@title, \\@date) и блоки \\makeatletter...\\makeatother, а заголовок/титул собери только через \\title/\\author/\\date/\\maketitle.
 - ЗАПРЕЩЕНО добавлять пакеты вне разрешённого списка из исходного документа. Если пакет неизвестен — удали его и замени функциональность стандартными средствами.
 - Сохрани \\documentclass, преамбулу (за вычетом удалённых пакетов) и всё содержание.
 
