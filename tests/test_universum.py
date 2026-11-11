@@ -876,3 +876,98 @@ def test_cyrillic_error_is_not_repaired_by_llm(monkeypatch):
         lc.compile_with_repair("ДОК", llm, config=cfg)
     assert called["n"] == 0
     assert "кириллиц" in str(exc.value)
+
+
+# --- GUI (customtkinter) — статическая проверка без запуска окна ---------------
+
+GUI_SOURCE = (Path(__file__).resolve().parents[1] / "src" / "universum" / "gui.py").read_text(encoding="utf-8")
+
+
+def _gui_code_only() -> str:
+    """Код gui.py без комментариев и docstring'ов (там допустимы любые упоминания)."""
+    import ast
+
+    tree = ast.parse(GUI_SOURCE)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            first = body[0] if body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                body.pop(0)
+    return ast.unparse(tree)
+
+
+GUI_CODE = _gui_code_only()
+# ast.unparse приводит кавычки к одинарным — сравниваем в едином виде
+GUI_CODE_Q = GUI_CODE.replace('"', "'")
+
+
+def _gui_function(name: str):
+    """Достаёт функцию из gui.py без импорта модуля (в CI нет tkinter/дисплея)."""
+    import ast
+
+    tree = ast.parse(GUI_SOURCE)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            namespace: dict[str, object] = {}
+            exec(compile(ast.Module([node], []), "gui.py", "exec"), namespace)  # noqa: S102
+            return namespace[name]
+    raise AssertionError(f"в gui.py нет функции {name}")
+
+
+def test_gui_uses_customtkinter_and_not_messagebox():
+    assert "import customtkinter" in GUI_CODE
+    assert "set_default_color_theme('blue')" in GUI_CODE_Q
+    assert "set_appearance_mode('system')" in GUI_CODE_Q
+    # модальные окна и тосты свои: ни импорта, ни вызовов messagebox
+    assert "messagebox" not in GUI_CODE, "ошибки должны показываться тостами/модалками"
+    # старый ttk-интерфейс не должен вернуться
+    assert "ttk" not in GUI_CODE
+
+
+def test_gui_has_required_widgets():
+    for needle in (
+        "'Сгенерировать PDF'",
+        "Опишите, что вы хотите сгенерировать",
+        "CTkProgressBar",
+        "CTkSlider",
+        "CTkOptionMenu",
+        "CTkTextbox",
+        "class Toast",
+        "class MessageDialog",
+        "class PlaceholderTextbox",
+        "class UniversumApp",
+    ):
+        assert needle in GUI_CODE, f"в gui.py отсутствует {needle}"
+
+
+def test_gui_hides_technical_details_from_main_window():
+    # технические названия не должны попадать в подписи главного окна
+    for needle in ("Tectonic", "pdflatex", "xelatex", "documentclass", "preamble"):
+        assert needle not in GUI_CODE, f"техническая деталь в GUI: {needle}"
+
+
+def test_gui_keeps_orchestrator_protocol():
+    for needle in ("__DONE__", "__LATEX_ERROR__", "__ERROR__", "reload_llm_config", "cancel_event"):
+        assert needle in GUI_CODE
+    assert "_progress_queue" in GUI_CODE
+    assert "threading.Thread" in GUI_CODE
+
+
+@pytest.mark.parametrize(
+    "count,expected",
+    [(1, "страница"), (3, "страницы"), (5, "страниц"), (11, "страниц"), (21, "страница"), (22, "страницы")],
+)
+def test_plural_pages(count, expected):
+    plural = _gui_function("_plural_pages")
+    assert plural(count) == expected
+
+
+def test_customtkinter_is_declared_as_dependency():
+    root = Path(__file__).resolve().parents[1]
+    assert "customtkinter" in (root / "requirements.txt").read_text(encoding="utf-8")
+    assert "customtkinter" in (root / "pyproject.toml").read_text(encoding="utf-8")
