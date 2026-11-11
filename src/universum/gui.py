@@ -403,7 +403,7 @@ class UniversumApp(tk.Tk):
                 )
                 self._progress_queue.put(f"__DONE__{result.pdf_path}")
             except LatexCompileError as e:
-                self._progress_queue.put(f"__LATEX_ERROR__{e.log}")
+                self._progress_queue.put(f"__LATEX_ERROR__{e.log or '(лог компилятора пуст)'}")
             except UniversumError as e:
                 self._progress_queue.put(f"__ERROR__{e}")
             except Exception as e:  # pragma: no cover — защита от падений
