@@ -51,7 +51,7 @@ from .config import (
 )
 from .llm_client import LlmClient
 from .orchestrator import GenerationRequest, Orchestrator
-from .utils import LatexCompileError, UniversumError, get_logger
+from .utils import LatexCompileError, UniversumError, get_logger, plural_ru
 
 # ---------------------------------------------------------------------------
 # Оформление
@@ -68,6 +68,211 @@ COLOR_ACCENT_HOVER = "#1d4ed8"
 COLOR_SUCCESS = "#16a34a"
 COLOR_ERROR = "#dc2626"
 COLOR_WARNING = "#d97706"
+
+# ---------------------------------------------------------------------------
+# Горячие клавиши: работают и на английской, и на русской раскладке
+# ---------------------------------------------------------------------------
+# На русской раскладке Tk присылает не «c», а кириллический keysym
+# (Cyrillic_es для «с» и т.д.), поэтому стандартные <Control-c> не срабатывают.
+# Сопоставляем keysym → латинскую букву и обрабатываем сами.
+_KEYSYM_TO_LETTER: dict[str, str] = {
+    "Cyrillic_es": "c",      # с
+    "Cyrillic_em": "v",      # м
+    "Cyrillic_che": "x",     # ч
+    "Cyrillic_ef": "a",      # ф
+    "Cyrillic_ya": "z",      # я
+    "Cyrillic_en": "y",      # н
+    "Cyrillic_yeru": "s",    # ы
+    "Cyrillic_shcha": "o",   # щ
+    "Cyrillic_ka": "r",      # к
+    "Cyrillic_tse": "w",     # ц
+}
+
+
+def _hotkey_letter(keysym: str | None) -> str | None:
+    """Латинская буква для комбинации Ctrl+<клавиша> в любой раскладке."""
+    if not keysym:
+        return None
+    mapped = _KEYSYM_TO_LETTER.get(keysym)
+    if mapped:
+        return mapped
+    low = keysym.lower()
+    if len(low) == 1 and "a" <= low <= "z":
+        return low
+    return None
+
+
+def _text_selection(box) -> tuple[str, str] | None:
+    """Границы выделения в многострочном поле (или None)."""
+    try:
+        ranges = box.tag_ranges("sel")
+    except Exception:  # pragma: no cover — виджет без тегов
+        return None
+    if not ranges:
+        return None
+    return str(ranges[0]), str(ranges[-1])
+
+
+def _copy_text(box) -> bool:
+    sel = _text_selection(box)
+    if not sel:
+        return False
+    text = box.get(*sel)
+    if not text:
+        return False
+    box.clipboard_clear()
+    box.clipboard_append(text)
+    return True
+
+
+def _cut_text(box) -> bool:
+    sel = _text_selection(box)
+    if not sel:
+        return False
+    text = box.get(*sel)
+    if text:
+        box.clipboard_clear()
+        box.clipboard_append(text)
+        try:
+            box.delete(*sel)  # в read-only поле (лог LaTeX) может быть запрещено
+        except Exception:
+            pass
+    return True
+
+
+def _paste_text(box) -> bool:
+    try:
+        text = box.clipboard_get()
+    except Exception:  # пустой или недоступный буфер обмена
+        return False
+    try:
+        sel = _text_selection(box)
+        if sel:
+            box.delete(*sel)
+        box.insert("insert", text)
+    except Exception:  # read-only поле — вставка невозможна
+        return False
+    return True
+
+
+def _select_all_text(box) -> bool:
+    try:
+        box.tag_add("sel", "1.0", "end-1c")
+    except Exception:  # pragma: no cover
+        return False
+    return True
+
+
+def _undo_text(box) -> bool:
+    try:
+        box.edit_undo()
+    except Exception:
+        return False
+    return True
+
+
+def _redo_text(box) -> bool:
+    try:
+        box.edit_redo()
+    except Exception:
+        return False
+    return True
+
+
+_TEXT_ACTIONS = {
+    "c": _copy_text,
+    "x": _cut_text,
+    "v": _paste_text,
+    "a": _select_all_text,
+    "z": _undo_text,
+    "y": _redo_text,
+}
+
+
+def install_text_hotkeys(box) -> None:
+    """Ctrl+C/V/X/A/Z для многострочного поля в любой раскладке.
+
+    Args:
+        box: ``CTkTextbox`` (или совместимый виджет с ``tag_ranges``/``insert``).
+    """
+
+    def _on_ctrl(event):
+        letter = _hotkey_letter(getattr(event, "keysym", None))
+        action = _TEXT_ACTIONS.get(letter or "")
+        if action is None:
+            return None
+        action(box)
+        return "break"  # не даём классу Tk сделать то же самое второй раз
+
+    box.bind("<Control-KeyPress>", _on_ctrl)
+
+
+def _entry_selection(box) -> tuple[str, str] | None:
+    """Границы выделения в однострочном поле (или None)."""
+    try:
+        if not box.select_present():
+            return None
+        return "sel.first", "sel.last"
+    except Exception:  # pragma: no cover
+        return None
+
+
+def install_entry_hotkeys(box) -> None:
+    """Ctrl+C/V/X/A/Z для однострочного поля (``CTkEntry``) в любой раскладке."""
+
+    def _copy() -> bool:
+        sel = _entry_selection(box)
+        if not sel:
+            return False
+        start, end = int(box.index(sel[0])), int(box.index(sel[1]))
+        text = box.get()[start:end]
+        if not text:
+            return False
+        box.clipboard_clear()
+        box.clipboard_append(text)
+        return True
+
+    def _delete_selection() -> None:
+        if _entry_selection(box):
+            box.delete("sel.first", "sel.last")
+
+    def _cut() -> bool:
+        if not _copy():
+            return False
+        _delete_selection()
+        return True
+
+    def _paste() -> bool:
+        try:
+            text = box.clipboard_get()
+        except Exception:
+            return False
+        _delete_selection()
+        box.insert("insert", text)
+        return True
+
+    def _select_all() -> bool:
+        box.select_range(0, "end")
+        box.icursor("end")
+        return True
+
+    actions = {
+        "c": _copy,
+        "x": _cut,
+        "v": _paste,
+        "a": _select_all,
+    }
+
+    def _on_ctrl(event):
+        letter = _hotkey_letter(getattr(event, "keysym", None))
+        action = actions.get(letter or "")
+        if action is None:
+            return None
+        action()
+        return "break"
+
+    box.bind("<Control-KeyPress>", _on_ctrl)
+
 
 PLACEHOLDER_REQUEST = "Опишите, что вы хотите сгенерировать…"
 PLACEHOLDER_STRUCTURE = "Структура документа (необязательно): разделы по порядку"
@@ -238,6 +443,7 @@ class MessageDialog(ctk.CTkToplevel):
             box.pack(fill="both", expand=True, pady=(14, 0))
             box.insert("1.0", details)
             box.configure(state="disabled")
+            install_text_hotkeys(box)
             self.details_box = box
         else:
             self.geometry("480x240")
@@ -378,8 +584,36 @@ class UniversumApp(ctk.CTk):
         self.search_switch: ctk.CTkSwitch | None = None
 
         self._build_ui()
-        self.bind("<Control-Return>", lambda _event: self._on_generate())
+        self._bind_shortcuts()
         self.after(120, self._poll_queue)
+
+    # -- горячие клавиши -------------------------------------------------
+
+    def _bind_shortcuts(self) -> None:
+        """Ctrl+Enter / Ctrl+S / Ctrl+O — в любой раскладке.
+
+        Enter, S и O на русской раскладке приходят как кириллические keysym
+        (``Cyrillic_yeru``, ``Cyrillic_shcha``), поэтому обрабатываем буквы сами.
+        """
+        for sequence in ("<Control-Return>", "<Control-KP_Enter>"):
+            self.bind(sequence, self._on_generate_shortcut)
+
+        def _on_ctrl(event):
+            letter = _hotkey_letter(getattr(event, "keysym", None))
+            if letter == "s":
+                self._on_save()
+                return "break"
+            if letter == "o":
+                self._choose_file()
+                return "break"
+            return None
+
+        self.bind("<Control-KeyPress>", _on_ctrl)
+
+    def _on_generate_shortcut(self, _event=None):
+        """Ctrl+Enter: запустить генерацию и не вставлять перевод строки."""
+        self._on_generate()
+        return "break"
 
     # -- построение интерфейса -------------------------------------------
 
@@ -447,6 +681,7 @@ class UniversumApp(ctk.CTk):
             wrap="word",
         )
         self.request_box.pack(fill="x")
+        install_text_hotkeys(self.request_box)
 
         # --- панель настроек в один ряд ---
         panel = ctk.CTkFrame(page, fg_color="transparent")
@@ -533,7 +768,7 @@ class UniversumApp(ctk.CTk):
 
         self.status_label = ctk.CTkLabel(
             status_row,
-            text="Введите запрос и нажмите «Сгенерировать PDF»",
+            text="Введите запрос и нажмите «Сгенерировать PDF» (Ctrl+Enter)",
             font=ctk.CTkFont(size=13),
             text_color=COLOR_MUTED,
             anchor="w",
@@ -690,6 +925,7 @@ class UniversumApp(ctk.CTk):
             wrap="word",
         )
         self.structure_box.pack(fill="x", pady=(12, 0))
+        install_text_hotkeys(self.structure_box)
 
         self.search_switch = ctk.CTkSwitch(
             inner,
@@ -729,14 +965,14 @@ class UniversumApp(ctk.CTk):
     def _on_type_changed(self, _value: str | None = None) -> None:
         """У теста объём — вопросы, у остальных — страницы."""
         if self._current_doc_type() == DocType.TEST:
-            self.volume_title.configure(text="Количество вопросов")
+            self.volume_title.configure(text="Вопросов в каждом варианте")
             self.volume_slider.configure(from_=5, to=50, number_of_steps=45)
             self.volume_slider.set(10)
             self.variants_row.pack(side="right", anchor="n", padx=(0, 20))
             if self.variants_slider is None:
                 ctk.CTkLabel(
                     self.variants_row,
-                    text="Вариантов ответа",
+                    text="Вариантов теста",
                     font=ctk.CTkFont(size=12),
                     text_color=COLOR_MUTED,
                     anchor="w",
@@ -752,10 +988,10 @@ class UniversumApp(ctk.CTk):
                     button_hover_color=COLOR_ACCENT_HOVER,
                     command=self._on_volume_changed,
                 )
-                self.variants_slider.set(4)
+                self.variants_slider.set(2)
                 self.variants_slider.pack(anchor="w", pady=(10, 0))
         else:
-            self.volume_title.configure(text="Объём")
+            self.volume_title.configure(text="Объём (страниц)")
             self.volume_slider.configure(from_=1, to=30, number_of_steps=29)
             self.volume_slider.set(5)
             self.variants_row.pack_forget()
@@ -769,8 +1005,11 @@ class UniversumApp(ctk.CTk):
     def _on_volume_changed(self, _value: float | None = None) -> None:
         if self._current_doc_type() == DocType.TEST:
             questions = int(round(self.volume_slider.get()))
-            variants = int(round(self.variants_slider.get())) if self.variants_slider else 4
-            self.volume_value.configure(text=f"{questions} вопросов · {variants} варианта")
+            variants = int(round(self.variants_slider.get())) if self.variants_slider else 2
+            self.volume_value.configure(
+                text=f"{questions} {_plural_questions(questions)} в варианте · "
+                f"{variants} {_plural_variants(variants)}"
+            )
         else:
             pages = int(round(self.volume_slider.get()))
             self.volume_value.configure(text=f"{pages} {_plural_pages(pages)}")
@@ -945,7 +1184,8 @@ class UniversumApp(ctk.CTk):
             title="Сохранить PDF",
             defaultextension=".pdf",
             filetypes=[("PDF", "*.pdf")],
-            initialfile="universum_document.pdf",
+            # имя уже собрано как «Тип — Тема» в оркестраторе
+            initialfile=self._result_pdf.name,
         )
         if not dest:
             return
@@ -1038,6 +1278,7 @@ class UniversumApp(ctk.CTk):
         )
         url_entry.insert(0, settings.url)
         url_entry.pack(fill="x", pady=(0, 10))
+        install_entry_hotkeys(url_entry)
 
         model_entry = ctk.CTkEntry(
             body,
@@ -1049,6 +1290,7 @@ class UniversumApp(ctk.CTk):
         )
         model_entry.insert(0, settings.model)
         model_entry.pack(fill="x", pady=(0, 10))
+        install_entry_hotkeys(model_entry)
 
         key_entry = ctk.CTkEntry(
             body,
@@ -1061,6 +1303,7 @@ class UniversumApp(ctk.CTk):
         )
         key_entry.insert(0, settings.api_key)
         key_entry.pack(fill="x", pady=(0, 10))
+        install_entry_hotkeys(key_entry)
 
         show_key = ctk.CTkSwitch(body, text="Показать ключ", font=ctk.CTkFont(size=12), text_color=COLOR_MUTED)
         show_key.pack(anchor="w")
@@ -1213,13 +1456,19 @@ class UniversumApp(ctk.CTk):
         ).pack(side="right", padx=(0, 8))
 
 
+def _plural_questions(n: int) -> str:
+    """Склонение слова «вопрос»."""
+    return plural_ru(n, "вопрос", "вопроса", "вопросов")
+
+
+def _plural_variants(n: int) -> str:
+    """Склонение слова «вариант» (тест)."""
+    return plural_ru(n, "вариант", "варианта", "вариантов")
+
+
 def _plural_pages(n: int) -> str:
     """Склонение слова «страница» для подписи слайдера."""
-    if n % 10 == 1 and n % 100 != 11:
-        return "страница"
-    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        return "страницы"
-    return "страниц"
+    return plural_ru(n, "страница", "страницы", "страниц")
 
 
 def run() -> None:

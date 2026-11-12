@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -569,7 +570,6 @@ def test_compile_latex_sanitizes_before_engine(monkeypatch):
         from pathlib import Path
 
         captured["tex"] = Path(cwd, "document.tex").read_text(encoding="utf-8")
-        p = lc.CompileResult  # noqa: F841 — просто для читаемости
         raise RuntimeError("останавливаемся после чтения файла")
 
     monkeypatch.setattr(lc, "subprocess", type("S", (), {"run": staticmethod(fake_run), "TimeoutExpired": Exception, "DEVNULL": -3}))
@@ -653,6 +653,8 @@ def test_preamble_braces_and_conditionals_balanced():
         ends = re.findall(r"\\end\{([^}]+)\}", txt)
         assert sorted(begins) == sorted(ends), style
         t2 = re.sub(r"\\newif\s*\\if[a-zA-Z@]+", "", txt)   # \newif объявляет, не открывает
+        # \ifstrempty/\ifdefempty — макросы etoolbox: они не открывают \fi
+        t2 = re.sub(r"\\(?:ifstrempty|ifdefempty|ifdefvoid|ifcsdef|ifblank|ifdefmacro)\b", "", t2)
         assert len(re.findall(r"\\if[a-zA-Z@]+", t2)) == len(re.findall(r"\\fi(?![a-zA-Z])", t2)), style
 
 
@@ -910,10 +912,13 @@ def _gui_function(name: str):
     """Достаёт функцию из gui.py без импорта модуля (в CI нет tkinter/дисплея)."""
     import ast
 
+    from universum.utils import plural_ru
+
     tree = ast.parse(GUI_SOURCE)
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
-            namespace: dict[str, object] = {}
+            # модульные глобали, которые нужны извлечённой функции
+            namespace: dict[str, object] = {"plural_ru": plural_ru}
             exec(compile(ast.Module([node], []), "gui.py", "exec"), namespace)  # noqa: S102
             return namespace[name]
     raise AssertionError(f"в gui.py нет функции {name}")
@@ -971,3 +976,648 @@ def test_customtkinter_is_declared_as_dependency():
     root = Path(__file__).resolve().parents[1]
     assert "customtkinter" in (root / "requirements.txt").read_text(encoding="utf-8")
     assert "customtkinter" in (root / "pyproject.toml").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Стили: без «Без стиля», плюс неон / природа / минимализм
+# ---------------------------------------------------------------------------
+
+def test_styles_are_five_and_plain_removed():
+    from universum.config import Style
+
+    values = [style.value for style in Style]
+    assert "plain" not in values
+    assert values == ["strict", "colorful", "neon", "nature", "minimal"]
+    labels = [style.label_ru for style in Style]
+    assert "Без стиля" not in labels
+    for expected in ("Строгий", "Красочный / креативный", "Неон", "Природа", "Современный минимализм"):
+        assert expected in labels
+
+
+def test_every_style_defines_doc_type_from_app():
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.TEST)
+        assert r"\newcommand{\universumdoctype}{Тест}" in pre, style
+        assert r"\makelecturetitle}[2][]" in pre, style  # необязательный аргумент доп. данных
+
+    # без явного типа — нейтральная подпись, а не «Лекция»
+    neutral = build_preamble(Style.NEON)
+    assert r"\universumdoctype}{Учебный материал}" in neutral
+
+
+def test_no_invented_title_fields_in_any_style():
+    """Титул не должен содержать придуманных данных: ни лектора, ни семестра."""
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.LECTURE)
+        assert "Фамилия" not in pre, style
+        assert "Лектор:" not in pre, style
+        assert "Семестр 2" not in pre, style
+        assert "Модуль 1" not in pre, style
+        # доп. данные печатаются только если они пришли (необязательный аргумент)
+        assert r"\ifstrempty{#1}{}" in pre, style
+
+
+def test_colorful_styles_use_tcolorbox_boxes():
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.LECTURE)
+        assert r"\IfFileExists{tcolorbox.sty}" in pre, style
+        # во всех стилях доступны одни и те же окружения (tcolorbox или fallback)
+        assert r"\universumplainboxes" in pre, style
+
+
+def test_wrap_document_puts_selected_type_on_title():
+    from universum.prompts import wrap_document
+
+    doc = wrap_document(r"\makelecturetitle{Квантовая механика}", Style.NATURE, doc_type=DocType.TEST)
+    assert r"\universumdoctype}{Тест}" in doc
+    doc2 = wrap_document(r"\makelecturetitle{Тема}", Style.COLORFUL, doc_type=DocType.HOMEWORK)
+    assert r"\universumdoctype}{Домашнее задание}" in doc2
+
+
+# ---------------------------------------------------------------------------
+# Тесты: варианты и ключ ответов с новой страницы
+# ---------------------------------------------------------------------------
+
+def test_test_prompt_requires_variants_and_separate_answer_key():
+    from universum.prompts import DOCTYPE_TEST
+
+    assert "{variants}" in DOCTYPE_TEST and "{questions}" in DOCTYPE_TEST
+    assert "Вариант 1" in DOCTYPE_TEST
+    assert r"\clearpage" in DOCTYPE_TEST
+    assert "Ключ ответов" in DOCTYPE_TEST
+    assert "НАЧИНАЕТСЯ ЗАНОВО" in DOCTYPE_TEST
+    # ключ всегда отдельно и с новой страницы
+    assert DOCTYPE_TEST.index("Ключ ответов") > DOCTYPE_TEST.index("Вариант 1")
+    assert "ответы рядом с вопросами писать запрещено" in DOCTYPE_TEST
+
+
+def test_test_prompt_gets_numbers_from_interface():
+    from universum.prompts import build_generation_prompt
+
+    ctx = PromptContext(
+        request_text="Тест по налогам",
+        doc_type=DocType.TEST,
+        style=Style.NEON,
+        volume=Volume(questions=8, variants=3),
+    )
+    prompt = build_generation_prompt(ctx)
+    assert "ровно 3 вариантов теста" in prompt
+    assert "ровно 8 вопросов" in prompt
+    assert "{variants}" not in prompt and "{questions}" not in prompt
+
+
+def test_volume_hint_test_counts_variants_and_questions():
+    ctx = PromptContext(request_text="x", doc_type=DocType.TEST, volume=Volume(questions=7, variants=3))
+    hint = volume_hint(ctx)
+    assert "3 вариантов теста" in hint
+    assert "7 вопросов" in hint
+    assert "с 1" in hint
+    assert "Ключ ответов" in hint
+
+
+# ---------------------------------------------------------------------------
+# Титул: только явные данные и всегда тема одним аргументом
+# ---------------------------------------------------------------------------
+
+def test_normalize_title_converts_legacy_four_args():
+    from universum.utils import normalize_title_call
+
+    body = r"\makelecturetitle{Экономика}{Семестр 2}{Лекция}{Налогообложение}" + "\n" + r"\section{X}"
+    out = normalize_title_call(body, "Лекция", "сделай лекцию про налогообложение")
+    assert out.startswith(r"\makelecturetitle{Налогообложение}")
+    assert "Семестр 2" not in out
+    assert "Экономика" not in out
+    assert r"\section{X}" in out
+
+
+def test_normalize_title_keeps_explicit_user_data():
+    from universum.utils import normalize_title_call
+
+    body = r"\makelecturetitle{Экономика}{Семестр 2}{Лекция}{Налоги}" + "\n" + "текст"
+    out = normalize_title_call(body, "Лекция", "лекция по налогам, семестр 2, экономика")
+    call = out.splitlines()[0]
+    assert call.startswith(r"\makelecturetitle[")
+    assert "Семестр 2" in call and "Экономика" in call
+    assert call.endswith("{Налоги}")
+
+
+def test_normalize_title_drops_invented_extras():
+    from universum.utils import normalize_title_call
+
+    body = r"\makelecturetitle[Лектор: Фамилия И.О. · Модуль 1]{Кванты}"
+    out = normalize_title_call(body, "Лекция", "лекция про кванты")
+    assert out == r"\makelecturetitle{Кванты}"
+
+
+def test_normalize_title_adds_missing_title_call():
+    from universum.utils import normalize_title_call
+
+    out = normalize_title_call(r"\section{Введение}", "Тест", "тест по квантовой механике")
+    assert out.startswith(r"\makelecturetitle{квантовой механике}")
+    assert r"\section{Введение}" in out
+
+
+# ---------------------------------------------------------------------------
+# Имя PDF: «Тип — Тема», безопасное для Windows
+# ---------------------------------------------------------------------------
+
+def test_suggest_document_name_uses_type_and_theme():
+    from universum.utils import suggest_document_name
+
+    name = suggest_document_name(
+        "Тест",
+        request_text="тест по налогам",
+        latex_code=r"\makelecturetitle{Налогообложение в России — новые законы 2026}",
+    )
+    assert name == "Тест — Налогообложение в России — новые законы 2026.pdf"
+    assert ":" not in name
+
+
+def test_suggest_document_name_falls_back_to_request():
+    from universum.utils import suggest_document_name
+
+    name = suggest_document_name("Лекция", request_text="Сделай лекцию по фотосинтезу: основы")
+    assert name.startswith("Лекция — фотосинтезу")
+    assert name.endswith(".pdf")
+
+
+def test_sanitize_filename_removes_forbidden_chars():
+    from universum.utils import sanitize_filename
+
+    cleaned = sanitize_filename('a<b>c:d?e*f"g|h\\i/j.pdf')
+    for bad in '<>:"/\\|?*':
+        assert bad not in cleaned
+    assert cleaned.endswith(".pdf") and "abc" in cleaned
+    assert sanitize_filename("CON.pdf") == "_CON.pdf"
+    assert sanitize_filename("   ...   ") == "Universum"
+    assert len(sanitize_filename("x" * 300)) <= 120
+    assert not sanitize_filename("имя. ").endswith(" ")
+
+
+def test_orchestrator_names_pdf_by_type_and_topic(monkeypatch, tmp_path):
+    """Сквозная проверка: тип на титуле из выбора пользователя + имя файла."""
+    fake_pdf = tmp_path / "compiled.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 test")
+    orch = Orchestrator()
+    body = (
+        r"\makelecturetitle{Экономика}{Семестр 2}{Лекция}{Налогообложение в России}" + "\n"
+        + r"\section{Вопросы}" + "\n" + "Текст"
+    )
+    monkeypatch.setattr(
+        orch.llm,
+        "generate",
+        lambda s, u, progress=None, cancel_event=None: body,
+    )
+    import universum.orchestrator as orch_mod
+
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        success = True
+        pdf_path = fake_pdf
+        log = ""
+        engine = "fake"
+
+    def fake_compile(code, llm, config=None, progress=None, cancel_event=None, postprocess=None, prompt_view=None):
+        captured["code"] = code
+        return FakeResult()
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", fake_compile)
+    req = GenerationRequest(
+        request_text="тест по налогообложению в России",
+        doc_type=DocType.TEST,
+        style=Style.NEON,
+        volume=Volume(questions=5, variants=3),
+    )
+    result = orch.generate(req)
+
+    # тип на титуле — из интерфейса, а не «Лекция» от модели
+    assert r"\universumdoctype}{Тест}" in captured["code"]
+    # в теле — ровно один вызов титула, с одной темой
+    body_part = captured["code"].split(r"\begin{document}", 1)[1]
+    assert body_part.count(r"\makelecturetitle") == 1
+    assert r"\makelecturetitle{Налогообложение в России}" in body_part
+    assert "Семестр 2" not in body_part
+    # имя файла: тип + тема, без запрещённых символов
+    assert result.pdf_path.name == "Тест — Налогообложение в России.pdf"
+    assert result.pdf_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Статическая проверка LaTeX: цвета, окружения, ветка без tcolorbox
+# ---------------------------------------------------------------------------
+
+_XCOLOR_BASE = {
+    "black", "white", "red", "green", "blue", "cyan", "magenta", "yellow",
+    "gray", "darkgray", "lightgray", "brown", "lime", "olive", "orange",
+    "pink", "purple", "teal", "violet", "none",
+}
+
+
+def _used_colors(latex: str) -> set[str]:
+    import re
+
+    used: set[str] = set()
+    for pattern in (
+        r"\\color\{([A-Za-z]+)(?:![0-9]+)?\}",
+        r"\\textcolor\{([A-Za-z]+)(?:![0-9]+)?\}",
+        r"col(?:frame|back|backtitle|title)=\{?([A-Za-z]+)(?:![0-9]+)?",
+        r"borderline(?:\s+west)?=\{?[^}]*\}?\{(?:[^{}]*)\}\{(?:[^{}]*)\}\{([A-Za-z]+)",
+    ):
+        used.update(re.findall(pattern, latex))
+    return used
+
+
+def test_all_colors_are_defined_in_every_style():
+    from universum.prompts import build_preamble
+
+    import re
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.TEST)
+        defined = set(re.findall(r"\\definecolor\{([A-Za-z]+)\}", pre))
+        used = _used_colors(pre)
+        unknown = used - defined - _XCOLOR_BASE
+        assert not unknown, f"{style}: не определены цвета {sorted(unknown)}"
+
+
+def test_environments_available_without_tcolorbox():
+    """Если tcolorbox нет, \\universumplainboxes должен дать все окружения."""
+    from universum.prompts import _PLAIN_BOXES
+
+    for env in ("definition", "theorem", "example", "important", "keyidea"):
+        assert rf"\newenvironment{{{env}}}" in _PLAIN_BOXES, env
+
+
+def test_no_fancy_unsupported_packages():
+    """Только пакеты из стандартного бандла Tectonic — без shell-escape."""
+    from universum.prompts import build_preamble
+
+    import re
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.LECTURE).lower()
+        for banned in ("minted", "biblatex", "glossaries", "cleveref", "siunitx", "texgyre"):
+            assert not re.search(rf"\\usepackage(\[[^\]]*\])?\{{[^}}]*\b{banned}\b", pre), (style, banned)
+
+
+def test_titlepage_has_single_mandatory_argument():
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.LECTURE)
+        assert r"\makelecturetitle}[2][]" in pre, style
+        assert r"\makelecturetitle}[4]" not in pre, style
+
+
+_ALLOWED_PACKAGES = {
+    "iftex", "fontenc", "inputenc", "lmodern", "fontspec", "babel", "geometry",
+    "etoolbox", "microtype", "amsmath", "amssymb", "amsthm", "graphicx", "booktabs",
+    "tabularx", "listings", "xcolor", "enumitem", "fancyhdr", "titlesec", "hyperref",
+    "tcolorbox", "fontawesome5", "tikz",
+}
+
+
+def test_only_standard_bundle_packages():
+    """Все \\usepackage — из стандартного бандла Tectonic (никаких экзотик)."""
+    import re
+
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.LECTURE)
+        used: set[str] = set()
+        for match in re.finditer(r"\\usepackage(?:\[[^\]]*\])?\{([^}]*)\}", pre):
+            used.update(part.strip() for part in match.group(1).split(","))
+        assert not used - _ALLOWED_PACKAGES, (style, sorted(used - _ALLOWED_PACKAGES))
+
+
+def test_preamble_works_without_tcolorbox_and_tikz():
+    """Ветки «пакета нет» должны быть полными: блоки и титул остаются."""
+    import re
+
+    from universum.prompts import build_preamble
+
+    for style in Style:
+        pre = build_preamble(style, "ru", doc_type=DocType.TEST)
+        fancy = re.search(r"\\ifuniversumfancy(.*?)\\else(.*?)\\fi", pre, re.DOTALL)
+        assert fancy is not None, style
+        without_tcb = pre[: fancy.start()] + fancy.group(2) + pre[fancy.end():]
+        assert "newtcolorbox" not in without_tcb, style
+        assert r"\universumplainboxes" in without_tcb, style
+        # скобки сбалансированы в выбранной ветке
+        txt = re.sub(r"(?<!\\)%.*", "", without_tcb)
+        assert txt.count("{") == txt.count("}"), style
+
+        tikz = re.search(r"\\ifuniversumtikz(.*?)\\else(.*?)\\fi", pre, re.DOTALL)
+        if tikz is not None:
+            without_tikz = pre[: tikz.start()] + tikz.group(2) + pre[tikz.end():]
+            assert without_tikz.count(r"\newcommand{\makelecturetitle}") == 1, style
+            txt = re.sub(r"(?<!\\)%.*", "", without_tikz)
+            assert txt.count("{") == txt.count("}"), style
+
+
+def test_test_document_with_variants_is_valid_latex():
+    """Тест с двумя вариантами и ключом: структура и валидность LaTeX."""
+    from universum.prompts import wrap_document
+
+    question = (
+        "\\begin{enumerate}\n"
+        "  \\item Вопрос?\n"
+        "  \\begin{enumerate}\n"
+        "    \\item[а)] Первый\n"
+        "    \\item[б)] Второй\n"
+        "  \\end{enumerate}\n"
+        "\\end{enumerate}"
+    )
+    body = (
+        r"\makelecturetitle{Налоги}" + "\n\n"
+        + r"\section*{Вариант 1}" + "\n" + question + "\n\n"
+        + r"\clearpage" + "\n" + r"\section*{Вариант 2}" + "\n" + question + "\n\n"
+        + r"\clearpage" + "\n" + r"\section*{Ключ ответов}" + "\n"
+        + r"\subsection*{Вариант 1}" + "\n" + "1 — а\n"
+    )
+    doc = wrap_document(body, Style.NATURE, "ru", doc_type=DocType.TEST)
+    assert validate_latex(doc) == []
+    assert doc.count(r"\clearpage") == 2
+    # ключ строго после вопросов и с новой страницы
+    assert doc.index(r"\section*{Ключ ответов}") > doc.index(r"\section*{Вариант 2}")
+    assert r"\clearpage" + "\n" + r"\section*{Ключ ответов}" in doc
+    assert r"\universumdoctype}{Тест}" in doc
+
+
+def test_previews_exist_for_every_style():
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1] / "examples"
+    for style in Style:
+        path = root / f"preview_{style.value}.tex"
+        assert path.exists(), path
+        text = path.read_text(encoding="utf-8")
+        assert text.splitlines()[0] == "% !TEX program = pdflatex"
+        assert r"\begin{document}" in text and r"\end{document}" in text
+    assert not (root / "preview_plain.tex").exists()
+
+
+def test_normalize_title_escapes_special_chars():
+    """Тема с % / & / # не должна ломать LaTeX (иначе % закомментирует строку)."""
+    from universum.utils import normalize_title_call
+
+    out = normalize_title_call(r"\makelecturetitle{Скидка 100\% и \$5 #1 & b}", "Лекция", "скидки")
+    assert out == r"\makelecturetitle{Скидка 100\% и 5 \#1 \& b}"
+    # «сырых» спецсимволов вне команд не осталось
+    body = out[len(r"\makelecturetitle{"):-1]
+    assert "%" not in body.replace(r"\%", "")
+    assert "&" not in body.replace(r"\&", "")
+
+
+def test_normalize_title_strips_wrong_doc_type_from_theme():
+    from universum.utils import normalize_title_call
+
+    out = normalize_title_call(r"\makelecturetitle{Лекция по физике}", "Тест", "тест по физике")
+    assert out == r"\makelecturetitle{физике}"
+
+    keep = normalize_title_call(r"\makelecturetitle{Физика: лекция 1}", "Лекция", "лекция по физике")
+    assert "Физика" in keep
+
+
+def test_ensure_page_breaks_before_variants_and_key():
+    from universum.utils import ensure_page_breaks
+
+    body = (
+        r"\makelecturetitle{Налоги}" + "\n\n"
+        + r"\section*{Инструкция}" + "\n10 вопросов.\n\n"
+        + r"\section*{Вариант 1}" + "\nвопрос\n\n"
+        + r"\section*{Вариант 2}" + "\nвопрос\n\n"
+        + r"\section*{Ключ ответов}" + "\n1 — а\n"
+    )
+    out = ensure_page_breaks(body)
+    # перед каждым вариантом и ключом — своя страница
+    for title in ("Вариант 1", "Вариант 2", "Ключ ответов"):
+        idx = out.index(title)
+        assert r"\clearpage" in out[max(0, idx - 40):idx], title
+    assert out.count(r"\clearpage") == 3
+    # инструкция остаётся на первой странице
+    assert out.index(r"\clearpage") > out.index("Инструкция")
+
+
+def test_ensure_page_breaks_keeps_existing_breaks():
+    from universum.utils import ensure_page_breaks
+
+    body = r"\newpage" + "\n" + r"\section*{Вариант 1}" + "\nвопрос\n"
+    out = ensure_page_breaks(body)
+    assert out.count(r"\newpage") == 1
+    assert r"\clearpage" not in out
+
+
+def test_ensure_page_breaks_ignores_lectures():
+    from universum.utils import ensure_page_breaks
+
+    body = r"\makelecturetitle{Множества}" + "\n\n" + r"\section{Введение}" + "\nтекст\n"
+    assert ensure_page_breaks(body) == body
+
+
+def test_orchestrator_adds_page_breaks_for_tests(monkeypatch, tmp_path):
+    from universum.orchestrator import GenerationRequest as Req
+
+    fake_pdf = tmp_path / "compiled.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 test")
+    orch = Orchestrator()
+    model_body = (
+        r"\makelecturetitle{Налоги}" + "\n\n"
+        + r"\section*{Вариант 1}" + "\nвопрос\n\n"
+        + r"\section*{Вариант 2}" + "\nвопрос\n\n"
+        + r"\section*{Ключ ответов}" + "\n1 — а\n"
+    )
+    monkeypatch.setattr(orch.llm, "generate", lambda s, u, progress=None, cancel_event=None: model_body)
+    import universum.orchestrator as orch_mod
+
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        success = True
+        pdf_path = fake_pdf
+        log = ""
+        engine = "fake"
+
+    def fake_compile(code, llm, config=None, progress=None, cancel_event=None, postprocess=None, prompt_view=None):
+        captured["code"] = code
+        return FakeResult()
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", fake_compile)
+    req = Req(
+        request_text="тест по налогам",
+        doc_type=DocType.TEST,
+        style=Style.MINIMAL,
+        volume=Volume(questions=5, variants=2),
+    )
+    orch.generate(req)
+    code = captured["code"]
+    assert code.count(r"\clearpage") == 3
+    assert code.index(r"\clearpage") < code.index(r"\section*{Вариант 1}")
+    assert code.index(r"\clearpage", code.index(r"Вариант 2")) < code.index(r"Ключ ответов")
+
+
+def test_count_variants_recognises_heading_styles():
+    from universum.utils import count_variants
+
+    body = (
+        r"\section*{Вариант 1}" + "\n" + "x\n"
+        + r"\section{Вариант 2}" + "\n" + "x\n"
+        + r"\subsection*{Variant 3}" + "\n" + "x\n"
+        + r"\section*{Ключ ответов}" + "\n" + "x\n"
+    )
+    assert count_variants(body) == 3
+    assert count_variants("") == 0
+
+
+def test_orchestrator_retries_when_too_few_variants(monkeypatch, tmp_path):
+    """Просили 2 варианта, модель дала 1 — приложение просит перегенерировать."""
+    from universum.orchestrator import GenerationRequest as Req
+
+    fake_pdf = tmp_path / "compiled.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 test")
+
+    one_variant = (
+        r"\makelecturetitle{Налоги}" + "\n"
+        + r"\section*{Вариант 1}" + "\nвопрос\n"
+        + r"\section*{Ключ ответов}" + "\n1 — а\n"
+    )
+    two_variants = (
+        r"\makelecturetitle{Налоги}" + "\n"
+        + r"\section*{Вариант 1}" + "\nвопрос\n"
+        + r"\section*{Вариант 2}" + "\nвопрос\n"
+        + r"\section*{Ключ ответов}" + "\n1 — а\n"
+    )
+
+    orch = Orchestrator()
+    calls: list[tuple[str, str]] = []
+
+    def fake_llm(system, user, progress=None, cancel_event=None):
+        calls.append((system, user))
+        return one_variant if len(calls) == 1 else two_variants
+
+    monkeypatch.setattr(orch.llm, "generate", fake_llm)
+    import universum.orchestrator as orch_mod
+
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        success = True
+        pdf_path = fake_pdf
+        log = ""
+        engine = "fake"
+
+    def fake_compile(code, llm, config=None, progress=None, cancel_event=None, postprocess=None, prompt_view=None):
+        captured["code"] = code
+        return FakeResult()
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", fake_compile)
+    req = Req(
+        request_text="тест по налогам",
+        doc_type=DocType.TEST,
+        style=Style.NEON,
+        volume=Volume(questions=5, variants=2),
+    )
+    orch.generate(req)
+
+    assert len(calls) == 2  # был повторный запрос
+    assert "ИСПРАВЛЕНИЕ" in calls[1][1]
+    assert "2 варианта" in calls[1][1]
+    assert captured["code"].count(r"\section*{Вариант") == 2
+
+
+def test_orchestrator_does_not_retry_when_variants_match(monkeypatch, tmp_path):
+    from universum.orchestrator import GenerationRequest as Req
+
+    fake_pdf = tmp_path / "compiled.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 test")
+    body = (
+        r"\makelecturetitle{Налоги}" + "\n"
+        + r"\section*{Вариант 1}" + "\nвопрос\n"
+        + r"\section*{Вариант 2}" + "\nвопрос\n"
+        + r"\section*{Ключ ответов}" + "\n1 — а\n"
+    )
+    orch = Orchestrator()
+    calls: list[int] = []
+
+    def fake_llm(system, user, progress=None, cancel_event=None):
+        calls.append(1)
+        return body
+
+    monkeypatch.setattr(orch.llm, "generate", fake_llm)
+    import universum.orchestrator as orch_mod
+
+    class FakeResult:
+        success = True
+        pdf_path = fake_pdf
+        log = ""
+        engine = "fake"
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", lambda code, llm, **kw: FakeResult())
+    req = Req(request_text="тест", doc_type=DocType.TEST, style=Style.STRICT, volume=Volume(questions=5, variants=2))
+    orch.generate(req)
+    assert len(calls) == 1
+
+
+def _strip_tex_comments(source: str) -> str:
+    lines = []
+    for line in source.splitlines():
+        out = []
+        i = 0
+        while i < len(line):
+            if line[i] == "\\" and i + 1 < len(line):
+                out.append(line[i:i + 2])
+                i += 2
+                continue
+            if line[i] == "%":
+                break
+            out.append(line[i])
+            i += 1
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("style", list(Style))
+@pytest.mark.parametrize("doc_type", list(DocType))
+def test_wrapped_document_is_structurally_valid(style, doc_type):
+    """Сгенерированный документ: сбалансированы скобки и окружения."""
+    from universum.prompts import wrap_document
+
+    body = (
+        r"\makelecturetitle{Тестовая тема}" + "\n\n"
+        r"\section{Раздел}" + "\n"
+        r"\begin{definition}[Термин]Определение.\end{definition}" + "\n"
+        r"\begin{important}Важно.\end{important}" + "\n"
+        r"\begin{enumerate}\item Один \begin{enumerate}\item[а)] да\end{enumerate}\end{enumerate}" + "\n"
+        r"\begin{tabularx}{\linewidth}{lX}\toprule A & B \\\bottomrule\end{tabularx}" + "\n"
+        r"\begin{lstlisting}[language=Python]\nprint(1)\n\end{lstlisting}" + "\n"
+    )
+    code = _strip_tex_comments(wrap_document(body, style, "ru", doc_type=doc_type))
+
+    depth = 0
+    i = 0
+    while i < len(code):
+        ch = code[i]
+        if ch == "\\":
+            i += 2
+            continue
+        depth += 1 if ch == "{" else -1 if ch == "}" else 0
+        assert depth >= 0, "лишняя закрывающая скобка: %s/%s" % (style, doc_type)
+        i += 1
+    assert depth == 0
+
+    stack: list[str] = []
+    for match in re.finditer(r"\\(begin|end)\{([^{}]+)\}", code):
+        if match.group(1) == "begin":
+            stack.append(match.group(2))
+        else:
+            assert stack and stack[-1] == match.group(2), "нарушен порядок окружений: %s/%s" % (style, doc_type)
+            stack.pop()
+    assert not stack
