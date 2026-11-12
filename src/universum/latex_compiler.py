@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import LatexConfig, get_config
+from .latex_sanitizer import strip_commands, undefined_commands_from_log
 from .utils import LatexCompileError, get_logger, log_event, sanitize_latex
 
 ProgressFn = Callable[[str], None]
@@ -471,6 +472,7 @@ def compile_with_repair(
     cfg = config or get_config().latex
     current = _text(latex_code)
     last: CompileResult | None = None
+    stripped: set[str] = set()  # какие команды уже выбросили по логу
     max_repairs = int(getattr(cfg, "max_repair_attempts", 3) or 0)
     for attempt in range(max_repairs + 1):
         if cancel_event is not None and cancel_event.is_set():
@@ -498,6 +500,24 @@ def compile_with_repair(
                 "MiKTeX: tex-gyre) — шаблон автоматически возьмёт TeX Gyre Heros. Лог — ниже.",
                 log=_text(result.log),
             )
+
+        # Детерминированная попытка: убрать команды, на которые ругается движок.
+        # Это дешевле и надёжнее, чем просить модель переписать текст.
+        offenders = [name for name in undefined_commands_from_log(result.log) if name not in stripped]
+        if offenders:
+            patched = strip_commands(current, offenders)
+            stripped.update(offenders)
+            if patched != current:
+                log_event(f"LaTeX compile: stripping unknown commands {offenders}")
+                if progress:
+                    progress("Убираю неизвестные команды LaTeX…")
+                patched_result = compile_latex(
+                    patched, config=cfg, progress=None, cancel_event=cancel_event
+                )
+                last = patched_result
+                if patched_result.success:
+                    return patched_result
+                current = patched
 
         # Авто-ремонт
         if progress:

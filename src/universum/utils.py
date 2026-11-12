@@ -9,6 +9,7 @@ import logging
 import re
 
 from .config import get_config
+from .latex_sanitizer import sanitize_llm_latex
 
 _logger: logging.Logger | None = None
 
@@ -197,7 +198,10 @@ def extract_document_body(raw: str) -> str:
     text = "\n".join(lines)
     # Убрать осиротевшие \begin{document}/\end{document} (двойные обёртки)
     text = text.replace(r"\end{document}", "").replace(r"\begin{document}", "")
-    return sanitize_latex(text.strip())
+    text = sanitize_latex(text.strip())
+    # Страховка: markdown-мусор, неэкранированные % & # _ ^, незакрытые скобки,
+    # окружения и запрещённые команды. Всё это ломает Tectonic ещё до компиляции.
+    return sanitize_llm_latex(text)
 
 
 def validate_latex(code: str) -> list[str]:

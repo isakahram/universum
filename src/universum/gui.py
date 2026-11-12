@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import queue
 import shutil
+import sys
 import threading
 from pathlib import Path
 from tkinter import filedialog
@@ -72,34 +73,133 @@ COLOR_WARNING = "#d97706"
 # ---------------------------------------------------------------------------
 # Горячие клавиши: работают и на английской, и на русской раскладке
 # ---------------------------------------------------------------------------
-# На русской раскладке Tk присылает не «c», а кириллический keysym
-# (Cyrillic_es для «с» и т.д.), поэтому стандартные <Control-c> не срабатывают.
-# Сопоставляем keysym → латинскую букву и обрабатываем сами.
+# Почему прошлый вариант не работал: на Windows при включённой русской раскладке
+# Tk присылает keysym "??" (а иногда — управляющий символ), поэтому проверять
+# только keysym бесполезно, и <Control-c> из класса Text тоже не срабатывает.
+#
+# Надёжный признак — ФИЗИЧЕСКИЙ код клавиши (event.keycode): он не зависит от
+# раскладки. На Windows это виртуальный код (VK_C = 67), на macOS — Mac keycode,
+# на Linux/X11 — X-код клавиши. Значения ниже — для стандартной клавиатуры.
+
+if sys.platform.startswith("win"):
+    _PLATFORM_KEYCODES = {
+        65: "a", 67: "c", 79: "o", 83: "s", 86: "v", 88: "x", 89: "y", 90: "z",
+    }
+elif sys.platform == "darwin":
+    _PLATFORM_KEYCODES = {
+        0: "a", 1: "s", 6: "z", 7: "x", 8: "c", 9: "v", 16: "y", 31: "o",
+    }
+else:  # X11 / Wayland
+    _PLATFORM_KEYCODES = {
+        29: "y", 32: "o", 38: "a", 39: "s", 52: "z", 53: "x", 54: "c", 55: "v",
+    }
+
+# Кириллический keysym → латинская буква на той же физической клавише
 _KEYSYM_TO_LETTER: dict[str, str] = {
-    "Cyrillic_es": "c",      # с
-    "Cyrillic_em": "v",      # м
-    "Cyrillic_che": "x",     # ч
-    "Cyrillic_ef": "a",      # ф
-    "Cyrillic_ya": "z",      # я
-    "Cyrillic_en": "y",      # н
-    "Cyrillic_yeru": "s",    # ы
-    "Cyrillic_shcha": "o",   # щ
-    "Cyrillic_ka": "r",      # к
-    "Cyrillic_tse": "w",     # ц
+    "Cyrillic_es": "c",       # с
+    "Cyrillic_em": "v",       # м
+    "Cyrillic_che": "x",      # ч
+    "Cyrillic_ef": "a",       # ф
+    "Cyrillic_ya": "z",       # я
+    "Cyrillic_yeru": "s",     # ы
+    "Cyrillic_shcha": "o",    # щ
+    "Cyrillic_en": "y",       # н
+    "Cyrillic_ka": "r",       # к
+    "Cyrillic_tse": "w",      # ц
+    "Cyrillic_ve": "d",       # в
+    "Cyrillic_pe": "g",       # п
+    "Cyrillic_er": "h",       # р
+    "Cyrillic_o": "j",        # о
+    "Cyrillic_el": "k",       # л
+    "Cyrillic_de": "l",       # д
+    "Cyrillic_te": "n",       # т
+    "Cyrillic_shorti": "q",   # й
+    "Cyrillic_i": "b",        # и
+    "Cyrillic_u": "e",        # у
+    "Cyrillic_ie": "t",       # е
+    "Cyrillic_sha": "i",      # ш
+    "Cyrillic_ze": "p",       # з
+    "Cyrillic_ha": "[",       # х
+    "Cyrillic_ghe": "u",      # г
+    "Cyrillic_be": ",",       # б
+    "Cyrillic_yu": ".",       # ю
+    "Cyrillic_zhe": ";",      # ж
+    "Cyrillic_e": "'",        # э
+    "Cyrillic_io": "`",       # ё
+    "Cyrillic_hardsign": "]",
+    "Cyrillic_softsign": "m",
 }
+
+# Символ кириллицы → латинская буква (на случай event.char вместо keysym)
+_CYR_CHAR_TO_LETTER: dict[str, str] = {
+    "с": "c", "м": "v", "ч": "x", "ф": "a", "я": "z", "ы": "s", "щ": "o",
+    "н": "y", "к": "r", "ц": "w", "в": "d", "п": "g", "р": "h", "о": "j",
+    "л": "k", "д": "l", "т": "n", "й": "q", "у": "e", "е": "t", "г": "u",
+    "ш": "i", "з": "p", "х": "[", "ъ": "]", "б": ",", "ю": ".", "ж": ";",
+    "э": "'", "ё": "`", "ь": "m",
+}
+
+# Управляющие символы Ctrl+A…Ctrl+Z (Windows нередко отдаёт именно их)
+_CONTROL_CHAR_TO_LETTER = {chr(1 + i): chr(ord("a") + i) for i in range(26)}
+
+
+def _letter_from_keycode(keycode) -> str | None:
+    """Латинская буква по физическому коду клавиши (не зависит от раскладки)."""
+    try:
+        return _PLATFORM_KEYCODES.get(int(keycode))
+    except (TypeError, ValueError):
+        return None
 
 
 def _hotkey_letter(keysym: str | None) -> str | None:
-    """Латинская буква для комбинации Ctrl+<клавиша> в любой раскладке."""
+    """Латинская буква для комбинации Ctrl+<клавиша> по keysym/символу.
+
+    Args:
+        keysym: ``event.keysym`` или сам символ.
+
+    Returns:
+        Латинская буква в нижнем регистре или ``None``.
+    """
     if not keysym:
         return None
-    mapped = _KEYSYM_TO_LETTER.get(keysym)
-    if mapped:
-        return mapped
+    if keysym in _KEYSYM_TO_LETTER:
+        return _KEYSYM_TO_LETTER[keysym]
+    if keysym in _CONTROL_CHAR_TO_LETTER:
+        return _CONTROL_CHAR_TO_LETTER[keysym]
+    if keysym in _CYR_CHAR_TO_LETTER:
+        return _CYR_CHAR_TO_LETTER[keysym]
     low = keysym.lower()
+    if low in _CYR_CHAR_TO_LETTER:
+        return _CYR_CHAR_TO_LETTER[low]
     if len(low) == 1 and "a" <= low <= "z":
         return low
     return None
+
+
+def hotkey_letter(event) -> str | None:
+    """Латинская буква для события Ctrl+<клавиша> в любой раскладке.
+
+    Порядок проверок: keysym/char (там, где Tk их отдаёт осмысленно, — это
+    точное соответствие нажатой клавише и на нестандартных раскладках) →
+    физический ``keycode`` (спасает на Windows с русской раскладкой, где
+    keysym приходит как ``"??"``).
+
+    Args:
+        event: Событие Tk (``keycode``/``keysym``/``char``).
+
+    Returns:
+        Латинская буква или ``None``.
+    """
+    for attr in ("keysym", "char"):
+        letter = _hotkey_letter(getattr(event, attr, None))
+        if letter:
+            return letter
+    return _letter_from_keycode(getattr(event, "keycode", None))
+
+
+def _text_widget(box):
+    """Внутренний ``tk.Text`` у ``CTkTextbox`` (или сам виджет)."""
+    return getattr(box, "_textbox", box)
 
 
 def _text_selection(box) -> tuple[str, str] | None:
@@ -189,22 +289,44 @@ _TEXT_ACTIONS = {
 }
 
 
-def install_text_hotkeys(box) -> None:
-    """Ctrl+C/V/X/A/Z для многострочного поля в любой раскладке.
+def install_text_hotkeys(box, on_ctrl_enter: Callable[[], None] | None = None) -> None:
+    """Ctrl+C/V/X/A/Z и Ctrl+Enter для многострочного поля в любой раскладке.
+
+    Привязка вешается на внутренний ``tk.Text`` (виджетный уровень), поэтому
+    срабатывает раньше стандартных обработчиков Tk, а возврат ``"break"``
+    не даёт им выполнить действие второй раз.
 
     Args:
         box: ``CTkTextbox`` (или совместимый виджет с ``tag_ranges``/``insert``).
+        on_ctrl_enter: Действие для Ctrl+Enter (обычно — запуск генерации).
     """
+    widget = _text_widget(box)
+    try:  # без undo=True стандартный Ctrl+Z в Text не работает вообще
+        widget.configure(undo=True, autoseparators=True, maxundo=-1)
+    except Exception:  # pragma: no cover — виджет без поддержки undo
+        pass
 
     def _on_ctrl(event):
-        letter = _hotkey_letter(getattr(event, "keysym", None))
+        letter = hotkey_letter(event)
         action = _TEXT_ACTIONS.get(letter or "")
         if action is None:
             return None
         action(box)
-        return "break"  # не даём классу Tk сделать то же самое второй раз
+        return "break"
 
-    box.bind("<Control-KeyPress>", _on_ctrl)
+    def _on_ctrl_enter(_event=None):
+        if on_ctrl_enter is not None:
+            on_ctrl_enter()
+        return "break"  # иначе в текст вставится перевод строки
+
+    widget.bind("<Control-KeyPress>", _on_ctrl)
+    widget.bind("<Control-Return>", _on_ctrl_enter)
+    widget.bind("<Control-KP_Enter>", _on_ctrl_enter)
+
+
+def _entry_widget(box):
+    """Внутренний ``tk.Entry`` у ``CTkEntry`` (или сам виджет)."""
+    return getattr(box, "_entry", box)
 
 
 def _entry_selection(box) -> tuple[str, str] | None:
@@ -218,7 +340,7 @@ def _entry_selection(box) -> tuple[str, str] | None:
 
 
 def install_entry_hotkeys(box) -> None:
-    """Ctrl+C/V/X/A/Z для однострочного поля (``CTkEntry``) в любой раскладке."""
+    """Ctrl+C/V/X/A для однострочного поля (``CTkEntry``) в любой раскладке."""
 
     def _copy() -> bool:
         sel = _entry_selection(box)
@@ -248,7 +370,10 @@ def install_entry_hotkeys(box) -> None:
         except Exception:
             return False
         _delete_selection()
-        box.insert("insert", text)
+        try:
+            box.insert("insert", text)
+        except Exception:
+            return False
         return True
 
     def _select_all() -> bool:
@@ -256,22 +381,17 @@ def install_entry_hotkeys(box) -> None:
         box.icursor("end")
         return True
 
-    actions = {
-        "c": _copy,
-        "x": _cut,
-        "v": _paste,
-        "a": _select_all,
-    }
+    actions = {"c": _copy, "x": _cut, "v": _paste, "a": _select_all}
 
     def _on_ctrl(event):
-        letter = _hotkey_letter(getattr(event, "keysym", None))
+        letter = hotkey_letter(event)
         action = actions.get(letter or "")
         if action is None:
             return None
         action()
         return "break"
 
-    box.bind("<Control-KeyPress>", _on_ctrl)
+    _entry_widget(box).bind("<Control-KeyPress>", _on_ctrl)
 
 
 PLACEHOLDER_REQUEST = "Опишите, что вы хотите сгенерировать…"
@@ -590,16 +710,18 @@ class UniversumApp(ctk.CTk):
     # -- горячие клавиши -------------------------------------------------
 
     def _bind_shortcuts(self) -> None:
-        """Ctrl+Enter / Ctrl+S / Ctrl+O — в любой раскладке.
+        """Ctrl+Enter / Ctrl+S / Ctrl+O — на любой раскладке и при любом фокусе.
 
-        Enter, S и O на русской раскладке приходят как кириллические keysym
-        (``Cyrillic_yeru``, ``Cyrillic_shcha``), поэтому обрабатываем буквы сами.
+        Привязка идёт через ``bind_all`` (тег «all»), поэтому срабатывает, даже
+        если фокус на кнопке, слайдере или в поле, где нет своих обработчиков.
+        В текстовых полях свои обработчики стоят на виджете и возвращают
+        ``"break"``, поэтому двойного срабатывания нет.
         """
         for sequence in ("<Control-Return>", "<Control-KP_Enter>"):
-            self.bind(sequence, self._on_generate_shortcut)
+            self.bind_all(sequence, self._on_generate_shortcut)
 
         def _on_ctrl(event):
-            letter = _hotkey_letter(getattr(event, "keysym", None))
+            letter = hotkey_letter(event)
             if letter == "s":
                 self._on_save()
                 return "break"
@@ -608,10 +730,17 @@ class UniversumApp(ctk.CTk):
                 return "break"
             return None
 
-        self.bind("<Control-KeyPress>", _on_ctrl)
+        self.bind_all("<Control-KeyPress>", _on_ctrl)
 
     def _on_generate_shortcut(self, _event=None):
         """Ctrl+Enter: запустить генерацию и не вставлять перевод строки."""
+        try:  # не мешаем работе в модальных окнах (настройки, лог ошибки)
+            focused = self.focus_get()
+            toplevel = focused.winfo_toplevel() if focused is not None else None
+            if toplevel is not None and toplevel is not self:
+                return None
+        except Exception:  # pragma: no cover — заглушки/нестандартные виджеты
+            pass
         self._on_generate()
         return "break"
 
@@ -681,7 +810,7 @@ class UniversumApp(ctk.CTk):
             wrap="word",
         )
         self.request_box.pack(fill="x")
-        install_text_hotkeys(self.request_box)
+        install_text_hotkeys(self.request_box, self._on_generate)
 
         # --- панель настроек в один ряд ---
         panel = ctk.CTkFrame(page, fg_color="transparent")
@@ -925,7 +1054,7 @@ class UniversumApp(ctk.CTk):
             wrap="word",
         )
         self.structure_box.pack(fill="x", pady=(12, 0))
-        install_text_hotkeys(self.structure_box)
+        install_text_hotkeys(self.structure_box, self._on_generate)
 
         self.search_switch = ctk.CTkSwitch(
             inner,
@@ -1091,7 +1220,8 @@ class UniversumApp(ctk.CTk):
                     progress=lambda m: self._progress_queue.put(m),
                     cancel_event=self._cancel_event,
                 )
-                self._progress_queue.put(f"__DONE__{result.pdf_path}")
+                suffix = "__SIMPLIFIED__" if getattr(result, "simplified", False) else ""
+                self._progress_queue.put(f"__DONE__{suffix}{result.pdf_path}")
             except LatexCompileError as e:
                 self._progress_queue.put(f"__LATEX_ERROR__{e.log or '(лог компилятора пуст)'}")
             except UniversumError as e:
@@ -1114,10 +1244,21 @@ class UniversumApp(ctk.CTk):
                 msg = self._progress_queue.get_nowait()
                 if msg.startswith("__DONE__"):
                     self._finish_progress()
-                    self._result_pdf = Path(msg[len("__DONE__"):])
+                    payload = msg[len("__DONE__"):]
+                    simplified = payload.startswith("__SIMPLIFIED__")
+                    if simplified:
+                        payload = payload[len("__SIMPLIFIED__"):]
+                    self._result_pdf = Path(payload)
                     self.save_btn.configure(state="normal")
                     self._set_status("Готово — PDF можно сохранить", COLOR_SUCCESS)
-                    self._toast("PDF готов. Нажмите «Сохранить PDF»", "success")
+                    if simplified:
+                        # нейросеть дала неисправимый LaTeX — собрали упрощённый вариант
+                        self._toast(
+                            "PDF готов, но собран в упрощённом режиме: часть оформления могла не сохраниться",
+                            "warning",
+                        )
+                    else:
+                        self._toast("PDF готов. Нажмите «Сохранить PDF»", "success")
                 elif msg.startswith("__LATEX_ERROR__"):
                     self._finish_progress()
                     log_text = msg[len("__LATEX_ERROR__"):]
