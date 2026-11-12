@@ -66,6 +66,13 @@ class _Widget:
         self._bindings[sequence] = command
         return "binding"
 
+    def bind_all(self, sequence=None, command=None, add=True):
+        self._bindings[f"all:{sequence}"] = command
+        return "binding"
+
+    def focus_get(self):
+        return None
+
     def unbind(self, *args, **kwargs):
         return None
 
@@ -461,16 +468,18 @@ def test_volume_label_pluralisation():
 # ---------------------------------------------------------------------------
 
 class _Event:
-    """Минимальное событие Tk: нужен только keysym."""
+    """Минимальное событие Tk: keysym/keycode/char, как в настоящем Tk."""
 
-    def __init__(self, keysym: str) -> None:
+    def __init__(self, keysym: str = "", keycode: int | None = None, char: str = "") -> None:
         self.keysym = keysym
+        self.keycode = keycode
+        self.char = char
 
 
-def _fire(widget, sequence: str, keysym: str):
+def _fire(widget, sequence: str, keysym: str = "", keycode: int | None = None, char: str = ""):
     handler = widget._bindings.get(sequence)
     assert handler is not None, f"нет привязки {sequence}"
-    return handler(_Event(keysym))
+    return handler(_Event(keysym, keycode, char))
 
 
 def test_hotkey_letter_maps_russian_keysyms():
@@ -543,7 +552,9 @@ def test_ctrl_enter_starts_generation():
     with _gui_module() as gui:
         app = _app(gui)
         app.request_box.set_value("Лекция по физике")
-        assert app._bindings.get("<Control-Return>") is not None
+        # Ctrl+Enter привязан глобально (тег «all») и на самом текстовом поле
+        assert app._bindings.get("all:<Control-Return>") is not None
+        assert app.request_box._bindings.get("<Control-Return>") is not None
         assert app._on_generate_shortcut(_Event("Return")) == "break"
         assert app._worker is not None
         app._worker.join(timeout=5)
@@ -597,3 +608,108 @@ def test_save_dialog_suggests_type_and_topic_name(tmp_path):
 
         assert captured["initialfile"] == "Тест — Квантовая механика.pdf"
         assert captured["defaultextension"] == ".pdf"
+
+
+# ---------------------------------------------------------------------------
+# Горячие клавиши: физический keycode (не зависит от раскладки)
+# ---------------------------------------------------------------------------
+
+_WIN_VK = {65: "a", 67: "c", 79: "o", 83: "s", 86: "v", 88: "x", 89: "y", 90: "z"}
+
+
+def test_hotkey_letter_uses_physical_keycode_when_keysym_is_unusable():
+    """На Windows с русской раскладкой Tk присылает keysym «??» — спасает keycode."""
+    with _gui_module() as gui:
+        gui._PLATFORM_KEYCODES = dict(_WIN_VK)  # как на Windows
+
+        assert gui.hotkey_letter(_Event(keysym="??", keycode=67)) == "c"   # VK_C
+        assert gui.hotkey_letter(_Event(keysym="??", keycode=86)) == "v"   # VK_V
+        assert gui.hotkey_letter(_Event(keysym="??", keycode=65)) == "a"   # VK_A
+        assert gui.hotkey_letter(_Event(keysym="??", keycode=90)) == "z"   # VK_Z
+        assert gui.hotkey_letter(_Event(keysym="", keycode=88)) == "x"
+        assert gui.hotkey_letter(_Event(keysym="F5", keycode=116)) is None
+
+
+def test_hotkey_letter_understands_control_chars_and_cyrillic_chars():
+    with _gui_module() as gui:
+        gui._PLATFORM_KEYCODES = {}
+        assert gui.hotkey_letter(_Event(keysym="", keycode=None, char="\x03")) == "c"
+        assert gui.hotkey_letter(_Event(keysym="Cyrillic_em", keycode=None)) == "v"
+        assert gui.hotkey_letter(_Event(keysym="", keycode=None, char="ф")) == "a"
+
+
+def test_copy_paste_work_with_windows_keycodes():
+    with _gui_module() as gui:
+        gui._PLATFORM_KEYCODES = dict(_WIN_VK)
+        app = _app(gui)
+        box = app.request_box
+        box.set_value("Квантовая механика")
+        box._sel = ("1.0", "1.18")
+
+        # русская раскладка: keysym невнятный, но keycode физический
+        assert _fire(box, "<Control-KeyPress>", "??", 67) == "break"
+        assert box._clipboard == "Квантовая механика"
+
+        box.set_value("")
+        box._clipboard = "вставлено"
+        assert _fire(box, "<Control-KeyPress>", "??", 86) == "break"
+        assert "вставлено" in str(box._value)
+
+        assert _fire(box, "<Control-KeyPress>", "??", 65) == "break"  # Ctrl+A
+        assert box._sel == ("1.0", "end-1c")
+
+
+def test_ctrl_z_undoes_in_text_box():
+    with _gui_module() as gui:
+        gui._PLATFORM_KEYCODES = dict(_WIN_VK)
+        app = _app(gui)
+        box = app.request_box
+        box.set_value("текст")
+        assert _fire(box, "<Control-KeyPress>", "??", 90) == "break"  # Ctrl+Z
+        assert str(box._value) == ""  # заглушка edit_undo очищает текст
+
+
+def test_ctrl_enter_in_text_box_triggers_generation():
+    with _gui_module() as gui:
+        app = _app(gui)
+        app.request_box.set_value("Лекция по физике")
+        # привязка живёт на самом поле, чтобы не вставлять перевод строки
+        assert _fire(app.request_box, "<Control-Return>") == "break"
+        assert app._worker is not None
+        app._worker.join(timeout=5)
+        app._poll_queue()
+        assert app._result_pdf is not None
+
+
+def test_hotkeys_bound_to_inner_tk_widget_of_textbox():
+    """Привязки ставятся на внутренний tk.Text (виджетный уровень)."""
+    with _gui_module() as gui:
+        app = _app(gui)
+        inner = _Widget()
+        app.request_box._textbox = inner
+        gui.install_text_hotkeys(app.request_box, app._on_generate)
+        assert "<Control-KeyPress>" in inner._bindings
+        assert "<Control-Return>" in inner._bindings
+        # undo включён — иначе Ctrl+Z в Text не работает вообще
+        assert inner._kwargs.get("undo") is True
+
+
+def test_cyrillic_keysyms_match_physical_keys():
+    """Раскладка ЙЦУКЕН: каждая кириллическая клавиша = латинская на той же клавише."""
+    with _gui_module() as gui:
+        pairs = {
+            "Cyrillic_es": "c", "Cyrillic_em": "v", "Cyrillic_che": "x",
+            "Cyrillic_ef": "a", "Cyrillic_ya": "z", "Cyrillic_en": "y",
+            "Cyrillic_te": "n", "Cyrillic_yeru": "s", "Cyrillic_shcha": "o",
+            "Cyrillic_ka": "r", "Cyrillic_tse": "w", "Cyrillic_ve": "d",
+            "Cyrillic_pe": "g", "Cyrillic_er": "h", "Cyrillic_o": "j",
+            "Cyrillic_el": "k", "Cyrillic_de": "l", "Cyrillic_u": "e",
+            "Cyrillic_ie": "t", "Cyrillic_sha": "i", "Cyrillic_ze": "p",
+            "Cyrillic_ghe": "u", "Cyrillic_shorti": "q", "Cyrillic_softsign": "m",
+            "Cyrillic_i": "b",
+        }
+        for keysym, letter in pairs.items():
+            assert gui._KEYSYM_TO_LETTER[keysym] == letter, keysym
+        # только латинские буквы и знаки — никакой кириллицы в таблице
+        for value in gui._KEYSYM_TO_LETTER.values():
+            assert value.isascii() and len(value) == 1

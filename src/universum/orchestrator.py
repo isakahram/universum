@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import threading
 from dataclasses import dataclass, field
@@ -13,25 +14,46 @@ from typing import Callable
 
 from .config import AppConfig, DocType, Style, Volume, get_config
 from .file_parser import parse_file
-from .latex_compiler import compile_with_repair
+from .latex_compiler import compile_latex, compile_with_repair
 from .llm_client import LlmClient
+from .latex_sanitizer import emergency_latex
 from .prompts import (
+    PLAN_SYSTEM_PROMPT,
+    SECTION_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     PromptContext,
     build_generation_prompt,
+    build_plan_prompt,
+    build_section_prompt,
+    build_volume_fix_prompt,
     detect_language,
     wrap_document,
 )
+from .sections import (
+    MIN_SECTION_WORDS,
+    assemble_document,
+    count_words,
+    fallback_plan,
+    insert_section,
+    parse_plan,
+    section_count,
+    split_titles,
+    target_words,
+    trim_to_words,
+)
 from .utils import (
+    LatexCompileError,
     UniversumError,
     count_variants,
     ensure_page_breaks,
-    plural_ru,
+    escape_latex_text,
     extract_document_body,
     get_logger,
     log_event,
     normalize_title_call,
+    plural_ru,
     suggest_document_name,
+    topic_from_request,
     validate_latex,
 )
 from .web_search import web_search
@@ -39,9 +61,35 @@ from .web_search import web_search
 ProgressFn = Callable[[str], None]
 
 
+# С какого объёма документ собирается по разделам (короткие — за один запрос):
+# длинный ответ сервис обрывает по лимиту токенов, и LaTeX остаётся незакрытым.
+_SECTIONAL_MIN_PAGES = 3
+
+# Допустимое отклонение объёма от ползунка (доли).
+_VOLUME_LOW = 0.65
+_VOLUME_HIGH = 1.45
+
+
 def _test_layout(body: str, doc_type: DocType) -> str:
     """Для тестов гарантировать новые страницы у вариантов и ключа ответов."""
     return ensure_page_breaks(body) if doc_type == DocType.TEST else body
+
+
+def _strip_title_page(body: str) -> str:
+    """Убрать из куска текста титул/оглавление/лишнюю преамбулу."""
+    text = body or ""
+    text = re.sub(r"\\makelecturetitle\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}", "", text)
+    text = re.sub(r"\\tableofcontents\b", "", text)
+    text = re.sub(r"\\clearpage\b", "", text)
+    return text.strip()
+
+
+def _section_tail(chunks: list[str]) -> str:
+    """Последние строки предыдущего раздела — для связности генерации."""
+    if not chunks:
+        return ""
+    plain = " ".join(chunks[-1].split())
+    return plain[-500:]
 
 
 @dataclass
@@ -64,6 +112,7 @@ class GenerationResult:
     pdf_path: Path
     latex_code: str
     sources: tuple[tuple[str, str], ...] = ()
+    simplified: bool = False  # PDF собран в «аварийном» режиме (без сложных команд)
 
 
 class Orchestrator:
@@ -172,8 +221,19 @@ class Orchestrator:
         # 5. Генерация LaTeX через LLM
         _p("Генерация документа нейросетью…")
         _check_cancel()
-        raw = self.llm.generate(SYSTEM_PROMPT, user_prompt, progress=_p, cancel_event=cancel_event)
-        body = extract_document_body(raw)
+
+        def _llm(system: str, user: str) -> str:
+            return self.llm.generate(system, user, progress=_p, cancel_event=cancel_event)
+
+        # Длинный документ собираем по разделам: так ответ не обрывается по лимиту
+        # токенов, объём управляем и LaTeX почти никогда не ломается.
+        sectional = req.doc_type != DocType.TEST and req.volume.pages >= _SECTIONAL_MIN_PAGES
+        if sectional:
+            body = self._generate_sectional(ctx, req, request_text, _llm, _p, _check_cancel)
+            raw = body
+        else:
+            raw = _llm(SYSTEM_PROMPT, user_prompt)
+            body = extract_document_body(raw)
 
         # Тест: следим, чтобы вариантов было ровно столько, сколько выбрали
         if req.doc_type == DocType.TEST and body:
@@ -201,6 +261,9 @@ class Orchestrator:
                     # берём ответ, который ближе к запрошенному числу вариантов
                     if abs(retried_count - expected) < abs(found - expected):
                         body = retried_body
+        # Объём: подгоняем под ползунок, если документ собрался сильно короче/длиннее
+        if not sectional and req.doc_type != DocType.TEST and body:
+            body = self._fix_volume(ctx, body, user_prompt, _llm, _p, _check_cancel)
         # Модель отдаёт только тело; преамбулу и оформление задаёт шаблон стиля,
         # поэтому сломать пакеты/кодировку она не может.
         if not body:
@@ -222,26 +285,48 @@ class Orchestrator:
         def _llm_for_repair(system: str, user: str) -> str:
             return self.llm.generate(system, user, progress=_p, cancel_event=cancel_event)
 
-        compiled = compile_with_repair(
-            latex_code,
-            _llm_for_repair,
-            config=self.config.latex,
-            progress=_p,
-            cancel_event=cancel_event,
-            # Ремонт возвращает тело — собираем документ заново с нашей преамбулой
-            postprocess=lambda fixed_raw: wrap_document(
-                _test_layout(
-                    normalize_title_call(
-                        extract_document_body(fixed_raw), req.doc_type.label_ru, request_text
+        simplified = False
+        try:
+            compiled = compile_with_repair(
+                latex_code,
+                _llm_for_repair,
+                config=self.config.latex,
+                progress=_p,
+                cancel_event=cancel_event,
+                # Ремонт возвращает тело — собираем документ заново с нашей преамбулой
+                postprocess=lambda fixed_raw: wrap_document(
+                    _test_layout(
+                        normalize_title_call(
+                            extract_document_body(fixed_raw), req.doc_type.label_ru, request_text
+                        ),
+                        req.doc_type,
                     ),
-                    req.doc_type,
+                    req.style,
+                    language=language,
+                    doc_type=req.doc_type,
                 ),
-                req.style,
-                language=language,
-                doc_type=req.doc_type,
-            ),
-            prompt_view=extract_document_body,
-        )
+                prompt_view=extract_document_body,
+            )
+        except LatexCompileError as err:
+            # Последний рубеж: выкидываем всё, в чём не уверены (незнакомые команды,
+            # окружения, определения), и пробуем собрать упрощённый документ.
+            _p("Пробую упрощённую вёрстку…")
+            _check_cancel()
+            safe_body = emergency_latex(body)
+            safe_code = wrap_document(
+                safe_body, req.style, language=language, doc_type=req.doc_type
+            )
+            safe_result = compile_latex(
+                safe_code, config=self.config.latex, progress=None, cancel_event=cancel_event
+            )
+            if not safe_result.success:
+                raise err
+            self.logger.warning("Emergency simplified compile succeeded")
+            log_event("Emergency latex compile succeeded")
+            compiled = safe_result
+            latex_code = safe_code
+            simplified = True
+            _p("PDF собран в упрощённом режиме — часть оформления могла не сохраниться.")
         assert compiled.pdf_path is not None
         # Копируем PDF в стабильное место (tempdir может очиститься)
         out_dir = self.config.temp_dir / "output"
@@ -254,4 +339,213 @@ class Orchestrator:
         shutil.copyfile(compiled.pdf_path, out_path)
         _p("Готово!")
         log_event(f"Generation done pdf={out_path} bytes={out_path.stat().st_size}")
-        return GenerationResult(pdf_path=out_path, latex_code=latex_code, sources=sources)
+        return GenerationResult(
+            pdf_path=out_path, latex_code=latex_code, sources=sources, simplified=simplified
+        )
+
+    # -- объём и поэтапная генерация --------------------------------------
+
+    def _generate_sectional(
+        self,
+        ctx: PromptContext,
+        req: GenerationRequest,
+        request_text: str,
+        llm_call: Callable[[str, str], str],
+        progress: Callable[[str], None],
+        check_cancel: Callable[[], None],
+    ) -> str:
+        """Собрать длинный документ по разделам (план → разделы → склейка).
+
+        Длинный ответ сервис обрывает по лимиту токенов: в обрыве остаются
+        незакрытые окружения, и Tectonic падает. Поэтому документ генерируется
+        маленькими кусками — каждый гарантированно доходит целиком.
+
+        Args:
+            ctx: Контекст промта.
+            req: Запрос генерации.
+            request_text: Текст запроса пользователя.
+            llm_call: Функция вызова модели ``(system, user) -> text``.
+            progress: Колбэк прогресса.
+            check_cancel: Проверка отмены (бросает исключение).
+
+        Returns:
+            Тело документа (титул + разделы).
+        """
+        pages = req.volume.pages
+        total_words = target_words(pages)
+        wanted = section_count(pages)
+
+        progress("План разделов…")
+        check_cancel()
+        titles: list[str] = []
+        try:
+            plan_raw = llm_call(PLAN_SYSTEM_PROMPT, build_plan_prompt(ctx, wanted))
+            titles = parse_plan(plan_raw, limit=wanted)
+        except UniversumError:
+            raise
+        except Exception as e:  # сеть/парсинг: план — не критичная часть
+            self.logger.warning("Plan generation failed: %s", e)
+        if len(titles) < 2:
+            titles = fallback_plan(req.doc_type.value, pages, ctx.structure_text)
+            log_event(f"Plan fallback used sections={len(titles)}")
+
+        per_section = max(MIN_SECTION_WORDS, total_words // max(1, len(titles)))
+        chunks: list[str] = []
+        for index, title in enumerate(titles, 1):
+            check_cancel()
+            progress(f"Раздел {index} из {len(titles)}: {title}…")
+            prompt = build_section_prompt(
+                ctx,
+                title=title,
+                index=index,
+                total=len(titles),
+                words=per_section,
+                outline=titles,
+                previous_tail=_section_tail(chunks),
+            )
+            try:
+                raw_part = llm_call(SECTION_SYSTEM_PROMPT, prompt)
+            except UniversumError:
+                raise
+            except Exception as e:
+                self.logger.warning("Section %s failed: %s", index, e)
+                continue
+            chunk = _strip_title_page(extract_document_body(raw_part))
+            if not chunk.strip():
+                continue
+            if "\\section" not in chunk:
+                chunk = f"\\section{{{title}}}\n\n" + chunk
+            chunks.append(chunk)
+
+        if not chunks:
+            raise UniversumError("Нейросеть не вернула текст разделов. Попробуйте ещё раз.")
+
+        theme = topic_from_request(request_text) or titles[0]
+        title_call = r"\makelecturetitle{" + escape_latex_text(theme) + "}"
+        with_toc = pages >= 4 and req.doc_type != DocType.HOMEWORK
+        body = assemble_document(title_call, chunks, with_toc=with_toc)
+
+        body = self._balance_sections(ctx, req, body, llm_call, progress, check_cancel)
+        words = count_words(body)
+        log_event(
+            f"Sectional generation sections={len(chunks)} words={words} "
+            f"target={total_words} pages={pages}"
+        )
+        return body
+
+    def _balance_sections(
+        self,
+        ctx: PromptContext,
+        req: GenerationRequest,
+        body: str,
+        llm_call: Callable[[str, str], str],
+        progress: Callable[[str], None],
+        check_cancel: Callable[[], None],
+    ) -> str:
+        """Довести объём собранного документа до ползунка.
+
+        Если текста мало — добавляем содержательные разделы; если много —
+        убираем целые разделы (не переписывая текст).
+
+        Args:
+            ctx: Контекст промта.
+            req: Запрос генерации.
+            body: Собранное тело.
+            llm_call: Функция вызова модели.
+            progress: Колбэк прогресса.
+            check_cancel: Проверка отмены.
+
+        Returns:
+            Тело, близкое к целевому объёму.
+        """
+        total_words = target_words(ctx.volume.pages)
+        words = count_words(body)
+        if words > total_words * _VOLUME_HIGH:
+            trimmed = trim_to_words(body, int(total_words * 1.35))
+            if count_words(trimmed) < words:
+                progress("Убираю лишний объём…")
+                body = trimmed
+                words = count_words(body)
+
+        extras = (
+            "Дополнительные примеры с разбором",
+            "Типичные ошибки и как их избежать",
+            "Практические задания с пояснениями",
+        )
+        for extra_title in extras:
+            if words >= total_words * 0.85:
+                break
+            check_cancel()
+            progress(f"Дополняю документ: {extra_title.lower()}…")
+            missing = max(MIN_SECTION_WORDS, total_words - words)
+            chunk_words = min(missing, max(MIN_SECTION_WORDS, total_words // 4))
+            outline = [*split_titles(body), extra_title]
+            prompt = build_section_prompt(
+                ctx,
+                title=extra_title,
+                index=len(outline),
+                total=len(outline),
+                words=chunk_words,
+                outline=outline,
+                previous_tail="",
+            )
+            try:
+                raw_part = llm_call(SECTION_SYSTEM_PROMPT, prompt)
+            except UniversumError:
+                raise
+            except Exception as e:
+                self.logger.warning("Extra section failed: %s", e)
+                break
+            chunk = _strip_title_page(extract_document_body(raw_part))
+            if not chunk.strip():
+                break
+            if "\\section" not in chunk:
+                chunk = f"\\section{{{extra_title}}}\n\n" + chunk
+            body = insert_section(body, chunk)
+            words = count_words(body)
+        return body
+
+    def _fix_volume(
+        self,
+        ctx: PromptContext,
+        body: str,
+        user_prompt: str,
+        llm_call: Callable[[str, str], str],
+        progress: Callable[[str], None],
+        check_cancel: Callable[[], None],
+    ) -> str:
+        """Подогнать короткий документ (1–2 страницы) под выбранный объём.
+
+        Args:
+            ctx: Контекст промта.
+            body: Тело от модели.
+            user_prompt: Исходный промт (к нему добавляется правка объёма).
+            llm_call: Функция вызова модели.
+            progress: Колбэк прогресса.
+            check_cancel: Проверка отмены.
+
+        Returns:
+            Тело — исходное или перегенерированное (что ближе к цели).
+        """
+        total_words = target_words(ctx.volume.pages)
+        words = count_words(body)
+        if total_words * _VOLUME_LOW <= words <= total_words * _VOLUME_HIGH:
+            return body
+        progress(f"Объём ≈{words} слов вместо {total_words} — прошу нейросеть исправить…")
+        check_cancel()
+        try:
+            retry_prompt = user_prompt + build_volume_fix_prompt(ctx, words, total_words)
+            retried_body = extract_document_body(llm_call(SYSTEM_PROMPT, retry_prompt))
+        except UniversumError:
+            raise
+        except Exception as e:
+            self.logger.warning("Volume fix failed: %s", e)
+            return body
+        if not retried_body:
+            return body
+        retried_words = count_words(retried_body)
+        if abs(retried_words - total_words) < abs(words - total_words):
+            log_event(f"Volume fix applied words={retried_words} target={total_words}")
+            return retried_body
+        return body
+

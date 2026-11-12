@@ -1621,3 +1621,447 @@ def test_wrapped_document_is_structurally_valid(style, doc_type):
             assert stack and stack[-1] == match.group(2), "нарушен порядок окружений: %s/%s" % (style, doc_type)
             stack.pop()
     assert not stack
+
+
+# ---------------------------------------------------------------------------
+# Санитайзер LaTeX: типичные ошибки нейросети исправляются до компиляции
+# ---------------------------------------------------------------------------
+
+
+def test_sanitizer_converts_markdown_to_latex():
+    from universum.latex_sanitizer import sanitize_llm_latex
+
+    out = sanitize_llm_latex("Это **жирный** и *курсив*, код `a_b`, ссылка [сайт](https://a.b/c).")
+    assert r"\textbf{жирный}" in out
+    assert r"\textit{курсив}" in out
+    assert r"\texttt{a\_b}" in out
+    assert r"\href{https://a.b/c}{сайт}" in out
+    assert "**" not in out
+
+
+def test_sanitizer_escapes_specials_in_text_only():
+    from universum.latex_sanitizer import sanitize_llm_latex
+
+    body = (
+        "Скидка 50% на всё, ты & я, файл data_2024.csv, пункт #3.\n"
+        + r"\begin{tabularx}{\linewidth}{lX}" + "\n"
+        + r"A & B \\" + "\n"
+        + r"\end{tabularx}" + "\n"
+        + r"Формула $x_1^2$ и \label{sec_intro} \url{http://a.b/c_d?x=1&y=2}" + "\n"
+        + r"\begin{lstlisting}[language=Python]" + "\nprint(a % 2)\n" + r"\end{lstlisting}"
+    )
+    out = sanitize_llm_latex(body)
+    assert r"50\%" in out
+    assert r"ты \& я" in out
+    assert r"data\_2024" in out
+    assert r"\#3" in out
+    # таблица, метки, URL и листинг не тронуты
+    assert r"A & B" in out
+    assert r"\label{sec_intro}" in out
+    assert "c_d?x=1&y=2" in out
+    assert "print(a % 2)" in out
+    assert "$x_1^2$" in out
+
+
+def test_sanitizer_fixes_unbalanced_braces_and_environments():
+    from universum.latex_sanitizer import sanitize_llm_latex
+
+    out = sanitize_llm_latex("\\section{Тема\nТекст\n\\begin{itemize}\n\\item раз\n")
+    lines = out.splitlines()
+    assert lines[0] == r"\section{Тема}"          # группа закрыта в конце строки
+    assert r"\end{itemize}" in out                  # окружение закрыто
+    assert r"\end{itemize}" not in sanitize_llm_latex("\\end{itemize}\nТекст")
+
+
+def test_sanitizer_removes_forbidden_constructions():
+    from universum.latex_sanitizer import sanitize_llm_latex
+
+    body = (
+        "\\documentclass{article}\n\\usepackage{geometry}\n"
+        "\\includegraphics[width=3cm]{pic.png}\n"
+        "\\begin{tikzpicture}\\draw (0,0)--(1,1);\\end{tikzpicture}\n"
+        "\\maketitle\nТекст.\n"
+        "\\begin{minted}{python}\nprint(1)\n\\end{minted}\n"
+    )
+    out = sanitize_llm_latex(body)
+    for bad in ("\\documentclass", "\\usepackage", "includegraphics", "tikzpicture", "\\maketitle", "minted"):
+        assert bad not in out
+    assert r"\begin{lstlisting}[language=python]" in out
+    assert "Текст." in out
+
+
+def test_sanitizer_flattens_nested_boxes():
+    from universum.latex_sanitizer import sanitize_llm_latex
+
+    out = sanitize_llm_latex(
+        "\\begin{definition}Внешний \\begin{example}внутренний\\end{example}\\end{definition}"
+    )
+    assert out.count(r"\begin{definition}") == 1
+    assert r"\begin{example}" not in out
+    assert out.count(r"\end{definition}") == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Текст с 5% и #1, snake_case, a & b",
+        "**жирный** и `код`",
+        "\\section{Тема\nТекст",
+        "\\begin{definition}Опр.\\end{definition}",
+        "\\begin{itemize}\\item раз",
+        "$x+1",
+        "\\url{http://a.b/c_d}",
+    ],
+)
+def test_sanitizer_is_idempotent(source):
+    from universum.latex_sanitizer import sanitize_llm_latex
+
+    once = sanitize_llm_latex(source)
+    assert sanitize_llm_latex(once) == once
+
+
+def test_emergency_latex_strips_unknown_macros_and_envs():
+    from universum.latex_sanitizer import emergency_latex
+
+    body = (
+        r"\makelecturetitle{Тема}" + "\n"
+        + r"\section{Введение}" + "\n"
+        + r"Текст \myweirdmacro{ерунда} и \foobar." + "\n"
+        + r"\renewcommand{\arraystretch}{1.2}" + "\n"
+        + r"\begin{mysteriousenv}Внутри.\end{mysteriousenv}" + "\n"
+        + r"\begin{definition}Опр.\end{definition}"
+    )
+    out = emergency_latex(body)
+    assert "myweirdmacro" not in out and "foobar" not in out
+    assert "arraystretch" not in out
+    assert "mysteriousenv" not in out
+    assert "ерунда" in out  # текст аргумента сохранён
+    assert r"\begin{definition}" in out and r"\makelecturetitle" in out
+
+
+# ---------------------------------------------------------------------------
+# Объём: слова, страницы, план разделов, подрезка
+# ---------------------------------------------------------------------------
+
+
+def test_target_words_scales_with_pages():
+    from universum.sections import WORDS_PER_PAGE, target_words
+
+    assert target_words(1) == WORDS_PER_PAGE
+    assert target_words(5) == 5 * WORDS_PER_PAGE
+    assert target_words(0) >= 150  # защита от нуля
+
+
+def test_count_words_ignores_commands_and_code():
+    from universum.sections import count_words
+
+    body = (
+        r"\section{Введение}" + "\n"
+        r"Одно два три четыре." + "\n"
+        r"\begin{lstlisting}[language=Python]" + "\nprint('много много слов')\n" + r"\end{lstlisting}" + "\n"
+        r"Формула $\alpha + \beta$."
+    )
+    assert count_words(body) == 6  # Введение + Одно два три четыре + Формула
+
+
+def test_parse_plan_understands_markdown_and_numbering():
+    from universum.sections import parse_plan
+
+    plan = (
+        "План документа:\n"
+        "1. Введение — зачем это нужно\n"
+        "2. **Основные понятия**: термины и определения\n"
+        "- Примеры расчёта: разбор кейсов\n"
+        "4. Выводы\n"
+    )
+    assert parse_plan(plan) == ["Введение", "Основные понятия", "Примеры расчёта", "Выводы"]
+
+
+def test_fallback_plan_uses_user_structure():
+    from universum.sections import fallback_plan
+
+    titles = fallback_plan("lecture", 5, "1. Введение\n2. Теория\n3. Практика")
+    assert titles == ["Введение", "Теория", "Практика"]
+    assert fallback_plan("lecture", 6)
+
+
+def test_trim_to_words_drops_sections_and_keeps_conclusions():
+    from universum.sections import count_words, trim_to_words
+
+    body = (
+        r"\makelecturetitle{Тема}" + "\n\n"
+        r"\section{Введение}" + "\n" + ("слово " * 100) + "\n\n"
+        r"\section{Теория}" + "\n" + ("слово " * 400) + "\n\n"
+        r"\section{Теория 2}" + "\n" + ("слово " * 400) + "\n\n"
+        r"\section{Выводы}" + "\n" + ("слово " * 50)
+    )
+    trimmed = trim_to_words(body, 700)
+    assert count_words(trimmed) <= 900
+    assert "Выводы" in trimmed          # итоговый раздел сохраняем
+    assert "Теория 2" not in trimmed    # лишний раздел убран
+
+
+def test_insert_section_goes_before_conclusions():
+    from universum.sections import insert_section
+
+    body = r"\section{Введение}" + "\nтекст\n" + r"\section{Выводы}" + "\nитог"
+    out = insert_section(body, r"\section{Примеры}" + "\nещё")
+    assert out.index("Примеры") < out.index("Выводы")
+
+
+# ---------------------------------------------------------------------------
+# Объём: промт и оркестратор
+# ---------------------------------------------------------------------------
+
+
+def test_volume_hint_contains_word_budget():
+    from universum.prompts import PromptContext as Ctx
+    from universum.prompts import volume_hint
+
+    hint = volume_hint(Ctx(request_text="x", doc_type=DocType.LECTURE, volume=Volume(pages=5)))
+    assert "2100" in hint          # 5 * 420
+    assert "слов" in hint
+    assert "5 страниц" in hint
+
+
+def test_plan_and_section_prompts_carry_budget():
+    from universum.prompts import PromptContext as Ctx
+    from universum.prompts import build_plan_prompt, build_section_prompt
+
+    ctx = Ctx(request_text="Налоги", doc_type=DocType.LECTURE, volume=Volume(pages=5))
+    plan = build_plan_prompt(ctx, 6)
+    assert "6 разделов" in plan and "2100" in plan
+
+    section = build_section_prompt(ctx, title="Введение", index=1, total=6, words=350, outline=["Введение", "Выводы"])
+    assert "≈350 слов" in section
+    assert "\\section{...}" in section.replace("\\\\", "\\")
+    assert "Введение" in section
+
+
+def test_system_prompt_bans_markdown_and_macros():
+    from universum.prompts import SYSTEM_PROMPT
+
+    assert "Markdown" in SYSTEM_PROMPT
+    assert "\\newcommand" in SYSTEM_PROMPT
+    assert "экранируй" in SYSTEM_PROMPT.lower() or "Экранируй" in SYSTEM_PROMPT
+
+
+def _fake_pdf(tmp_path):
+    path = tmp_path / "compiled.pdf"
+    path.write_bytes(b"%PDF-1.4 test")
+    return path
+
+
+class _FakeCompileResult:
+    """Успешная компиляция-заглушка."""
+
+    def __init__(self, pdf_path):
+        self.success = True
+        self.pdf_path = pdf_path
+        self.log = ""
+        self.engine = "fake"
+
+
+def test_sectional_generation_builds_document_from_parts(monkeypatch, tmp_path):
+    """Длинный документ собирается по разделам: план → разделы → склейка."""
+    from universum.prompts import PLAN_SYSTEM_PROMPT, SECTION_SYSTEM_PROMPT
+
+    orch = Orchestrator()
+    calls: list[str] = []
+    section_words = " ".join(["слово"] * 350)
+
+    def fake_generate(system, user, progress=None, cancel_event=None):
+        calls.append(system)
+        if system == PLAN_SYSTEM_PROMPT:
+            return "1. Введение — цели\n2. Основные понятия — термины\n3. Примеры — разбор\n4. Выводы — итог"
+        assert system == SECTION_SYSTEM_PROMPT
+        return "```latex\n\\section{Раздел}\n" + section_words + "\n```"
+
+    monkeypatch.setattr(orch.llm, "generate", fake_generate)
+    import universum.orchestrator as orch_mod
+
+    captured: dict[str, str] = {}
+
+    def fake_compile(code, llm, **kwargs):
+        captured["code"] = code
+        return _FakeCompileResult(_fake_pdf(tmp_path))
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", fake_compile)
+
+    req = GenerationRequest(
+        request_text="Налогообложение в России",
+        doc_type=DocType.LECTURE,
+        style=Style.NEON,
+        volume=Volume(pages=5),
+    )
+    result = orch.generate(req)
+
+    code = captured["code"]
+    assert calls[0] == PLAN_SYSTEM_PROMPT
+    assert calls.count(SECTION_SYSTEM_PROMPT) >= 4  # хотя бы по одному запросу на раздел
+    assert code.count("\\section") >= 4
+    assert "\\makelecturetitle{Налогообложение в России}" in code
+    assert "```" not in code  # markdown-обёртки вычищены
+    assert result.pdf_path.name.startswith("Лекция — ")
+
+
+def test_sectional_generation_uses_plan_fallback(monkeypatch, tmp_path):
+    """Если план не пришёл — берём стандартную структуру, а не падаем."""
+    from universum.prompts import PLAN_SYSTEM_PROMPT
+
+    orch = Orchestrator()
+
+    def fake_generate(system, user, progress=None, cancel_event=None):
+        if system == PLAN_SYSTEM_PROMPT:
+            raise RuntimeError("сервис недоступен")
+        return "\\section{Часть}\n" + " ".join(["слово"] * 350)
+
+    monkeypatch.setattr(orch.llm, "generate", fake_generate)
+    import universum.orchestrator as orch_mod
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        orch_mod,
+        "compile_with_repair",
+        lambda code, llm, **kwargs: (captured.setdefault("code", code), _FakeCompileResult(_fake_pdf(tmp_path)))[1],
+    )
+    req = GenerationRequest(request_text="Кванты", doc_type=DocType.LECTURE, volume=Volume(pages=3))
+    orch.generate(req)
+    assert captured["code"].count("\\section") >= 3
+
+
+def test_short_document_requests_more_text(monkeypatch, tmp_path):
+    """Запросили 1 страницу, модель дала 20 слов — просим переписать."""
+    orch = Orchestrator()
+    responses = [
+        "\\makelecturetitle{Тема}\n\\section{Введение}\n" + "слово " * 20,
+        "\\makelecturetitle{Тема}\n\\section{Введение}\n" + "слово " * 420,
+    ]
+    prompts: list[str] = []
+
+    def fake_generate(system, user, progress=None, cancel_event=None):
+        prompts.append(user)
+        return responses[min(len(prompts), len(responses)) - 1]
+
+    monkeypatch.setattr(orch.llm, "generate", fake_generate)
+    import universum.orchestrator as orch_mod
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        orch_mod,
+        "compile_with_repair",
+        lambda code, llm, **kwargs: (captured.setdefault("code", code), _FakeCompileResult(_fake_pdf(tmp_path)))[1],
+    )
+    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(pages=1))
+    orch.generate(req)
+
+    assert len(prompts) == 2
+    assert "ИСПРАВЛЕНИЕ ОБЪЁМА" in prompts[1]
+    # в PDF пошёл длинный вариант
+    from universum.sections import count_words
+
+    body = captured["code"].split("\\begin{document}", 1)[1]
+    assert count_words(body) > 300
+
+
+def test_emergency_compile_when_repair_fails(monkeypatch, tmp_path):
+    """Авто-ремонт не помог — собираем упрощённый вариант и предупреждаем."""
+    from universum.utils import LatexCompileError
+
+    orch = Orchestrator()
+    body = (
+        "\\makelecturetitle{Тема}\n\\section{Введение}\n"
+        + "\\myweirdmacro{текст} " + "слово " * 100
+    )
+    monkeypatch.setattr(orch.llm, "generate", lambda s, u, progress=None, cancel_event=None: body)
+    import universum.orchestrator as orch_mod
+
+    def fake_compile_with_repair(*args, **kwargs):
+        raise LatexCompileError("не собралось", log="! Undefined control sequence")
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", fake_compile_with_repair)
+
+    seen: dict[str, str] = {}
+
+    def fake_compile_latex(code, **kwargs):
+        seen["code"] = code
+        return _FakeCompileResult(_fake_pdf(tmp_path))
+
+    monkeypatch.setattr(orch_mod, "compile_latex", fake_compile_latex)
+
+    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(pages=1))
+    result = orch.generate(req)
+
+    assert result.simplified is True
+    assert "myweirdmacro" not in seen["code"]  # незнакомый макрос вырезан
+    assert result.pdf_path.exists()
+
+
+def test_emergency_compile_reraises_when_even_simple_fails(monkeypatch, tmp_path):
+    from universum.utils import LatexCompileError
+
+    orch = Orchestrator()
+    monkeypatch.setattr(
+        orch.llm, "generate", lambda s, u, progress=None, cancel_event=None: "\\section{A}\nтекст"
+    )
+    import universum.orchestrator as orch_mod
+
+    def boom(*args, **kwargs):
+        raise LatexCompileError("не собралось", log="log")
+
+    monkeypatch.setattr(orch_mod, "compile_with_repair", boom)
+
+    class Failed:
+        success = False
+        pdf_path = None
+        log = "still broken"
+        engine = "tectonic"
+
+    monkeypatch.setattr(orch_mod, "compile_latex", lambda code, **kwargs: Failed)
+
+    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(pages=1))
+    with pytest.raises(LatexCompileError):
+        orch.generate(req)
+
+
+def test_undefined_commands_from_log_and_strip():
+    from universum.latex_sanitizer import strip_commands, undefined_commands_from_log
+
+    log = (
+        "! Undefined control sequence.\n"
+        "l.42 \\foobar\n"
+        "              {x}\n"
+        "! Undefined control sequence.\n"
+        "l.43 \\bazqux\n"
+    )
+    assert undefined_commands_from_log(log) == ["foobar", "bazqux"]
+    assert undefined_commands_from_log("! TeX capacity exceeded") == []
+    assert strip_commands("текст \\foobar{a} и \\bazqux", ["foobar", "bazqux"]).strip() == "текст {a} и"
+    assert strip_commands("\\foobarbaz", ["foobar"]) == "\\foobarbaz"  # не режем по префиксу
+
+
+def test_compile_strips_unknown_command_without_llm(monkeypatch):
+    """Неизвестную команду из лога убираем сами — без запроса к модели."""
+    import universum.latex_compiler as lc
+
+    calls: list[str] = []
+
+    def fake_compile(code, **kwargs):
+        calls.append(code)
+        if len(calls) == 1:
+            return lc.CompileResult(False, None, "! Undefined control sequence.\nl.5 \\foobar\n")
+        return lc.CompileResult(True, None, "")
+
+    monkeypatch.setattr(lc, "compile_latex", fake_compile)
+    llm_calls: list[int] = []
+
+    def llm(system, user):
+        llm_calls.append(1)
+        return "тело"
+
+    cfg = type("C", (), {"max_repair_attempts": 2, "engine_preference": ()})()
+    out = lc.compile_with_repair("текст \\foobar{a}", llm, config=cfg)
+
+    assert out.success is True
+    assert llm_calls == []            # модель не понадобилась
+    assert "\\foobar" not in calls[1]  # команда вырезана
