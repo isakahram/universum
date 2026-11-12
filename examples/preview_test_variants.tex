@@ -1,0 +1,363 @@
+% !TEX program = pdflatex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{iftex}
+\ifPDFTeX
+  % pdflatex: 8-битные шрифты. T2A + Latin Modern дают кириллицу.
+  \usepackage[T2A]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{lmodern}
+\else
+  % xelatex / lualatex / Tectonic: только стандартный fontspec и DejaVu.
+  % DejaVu гарантированно содержит кириллицу и есть в бандле TeX Live/Tectonic.
+  % Шрифт ищем по имени ФАЙЛА (kpse), а не по имени семейства: в Tectonic
+  % fontconfig может быть недоступен («Cannot load default config file»),
+  % поэтому \setmainfont{DejaVu Serif} по имени там не работает.
+  \usepackage{fontspec}
+  \IfFontExistsTF{DejaVuSerif.ttf}
+    {\setmainfont{DejaVuSerif.ttf}}
+    {\IfFontExistsTF{LiberationSerif-Regular.ttf}
+      {\setmainfont{LiberationSerif-Regular.ttf}}
+      {\typeout{UNIVERSUM: WARNING DejaVu Serif not found, Cyrillic may be missing}}}
+  \IfFontExistsTF{DejaVuSans.ttf}
+    {\setsansfont{DejaVuSans.ttf}}
+    {\IfFontExistsTF{LiberationSans-Regular.ttf}
+      {\setsansfont{LiberationSans-Regular.ttf}}
+      {\typeout{UNIVERSUM: WARNING DejaVu Sans not found}}}
+  \IfFontExistsTF{DejaVuSansMono.ttf}
+    {\setmonofont{DejaVuSansMono.ttf}}
+    {\typeout{UNIVERSUM: WARNING DejaVu Sans Mono not found}}
+\fi
+\usepackage[english,russian]{babel}
+\usepackage[margin=2.2cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{etoolbox}   % \ifstrempty для необязательных данных титула
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{amsthm}   % \qed и окружение proof
+\usepackage{graphicx}
+\usepackage{booktabs}   % \toprule/\midrule/\bottomrule
+\usepackage{tabularx}   % таблицы с переносом текста
+\usepackage{listings}   % листинги кода (не minted: не нужен shell-escape)
+\usepackage[table,dvipsnames]{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+% ---------- палитра ----------
+\definecolor{primary}{HTML}{6D28D9}
+\definecolor{secondary}{HTML}{DB2777}
+\definecolor{accent}{HTML}{0891B2}
+\definecolor{soft}{HTML}{F5F3FF}
+\definecolor{highlight}{HTML}{BEF264}
+\definecolor{textgray}{HTML}{374151}
+
+% ---------- листинги кода ----------
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  tabsize=4,
+  showstringspaces=false,
+  extendedchars=true,
+  inputencoding=utf8
+}
+
+% ---------- вспомогательные команды ----------
+\newcommand{\term}[1]{\textcolor{primary}{\textbf{#1}}}
+\newcommand{\hl}[1]{\colorbox{highlight!60}{#1}}
+
+% ---------- тип документа задаёт приложение, а не модель ----------
+% Значение подставляет build_preamble() из выбора пользователя.
+\newcommand{\universumdoctype}{Тест}
+
+
+% ---------- иконки: грузим только если пакет есть ----------
+\IfFileExists{fontawesome5.sty}{\usepackage{fontawesome5}}{}
+
+% ---------- иконки ----------
+% Каждая иконка проверяется через \ifcsname: если пакета нет или в этой версии
+% fontawesome5 глифа нет (например \faCalendarAlt), команда просто пустая
+% и документ всё равно собирается (иначе «Undefined control sequence»).
+\newcommand{\universumicon}[1]{\ifcsname #1\endcsname\csname #1\endcsname\enspace\fi}
+\newcommand{\iconBulb}{\universumicon{faLightbulb}}
+\newcommand{\iconBook}{\universumicon{faBookOpen}}
+\newcommand{\iconFlask}{\universumicon{faFlask}}
+\newcommand{\iconWarn}{\universumicon{faExclamationTriangle}}
+\newcommand{\iconGrad}{\universumicon{faGraduationCap}}
+\newcommand{\iconUser}{\ifcsname faUserGraduate\endcsname\faUserGraduate\enspace
+  \else\ifcsname faUser\endcsname\faUser\enspace\fi\fi}
+\newcommand{\iconCal}{\ifcsname faCalendarAlt\endcsname\faCalendarAlt\enspace
+  \else\ifcsname faCalendarDays\endcsname\faCalendarDays\enspace
+  \else\ifcsname faCalendar\endcsname\faCalendar\enspace\fi\fi\fi}
+\newcommand{\iconRight}{\ifcsname faChevronRight\endcsname\faChevronRight\else$\triangleright$\fi}
+
+
+% ============================================================
+%   БЛОКИ без tcolorbox (минимальное оформление)
+% ============================================================
+\newcommand{\universumplainboxes}{%
+  \newenvironment{definition}[1][]{\par\medskip\noindent\textbf{Определение.}\ \itshape}{\par\medskip}%
+  \newenvironment{theorem}[1][]{\par\medskip\noindent\textbf{Теорема.}\ \itshape}{\par\medskip}%
+  \newenvironment{example}[1][]{\par\medskip\noindent\textbf{Пример.}\ \normalfont}{\par\medskip}%
+  \newenvironment{important}[1][]{\par\medskip\noindent\textbf{Важно.}\ \normalfont}{\par\medskip}%
+  \newenvironment{keyidea}[1][]{\par\medskip\noindent\itshape}{\par\medskip}%
+}
+
+
+% ============================================================
+%   БЛОКИ «НЕОН» (tcolorbox) + запасной вариант без tcolorbox
+% ============================================================
+\newif\ifuniversumfancy
+\IfFileExists{tcolorbox.sty}{\universumfancytrue}{\universumfancyfalse}
+\ifuniversumfancy
+  \usepackage[most]{tcolorbox}
+  \tcbset{
+    lecbox/.style={
+      enhanced, breakable,
+      colback=soft, colframe=primary, coltitle=white,
+      fonttitle=\bfseries\sffamily,
+      boxrule=1pt, arc=9pt, outer arc=9pt,
+      left=10pt, right=10pt, top=8pt, bottom=8pt,
+      attach boxed title to top left={xshift=8pt, yshift=-9pt},
+      boxed title style={colback=primary, sharp corners, boxrule=0pt, arc=3pt,
+        left=6pt, right=6pt, top=3pt, bottom=3pt},
+      top=15pt,
+      borderline={0.7pt}{-2pt}{accent}
+    }
+  }
+  \newtcolorbox{definition}[1][]{lecbox, title={\iconBulb Определение},
+    colframe=accent, boxed title style={colback=accent}, #1}
+  \newtcolorbox{theorem}[1][]{lecbox, title={\iconBook Теорема}, #1}
+  \newtcolorbox{example}[1][]{lecbox, title={\iconFlask Пример},
+    colframe=secondary, boxed title style={colback=secondary}, #1}
+  \newtcolorbox{important}[1][]{lecbox, title={\iconWarn Важно},
+    colframe=secondary, boxed title style={colback=secondary},
+    colback=highlight!20, #1}
+  \newtcolorbox{keyidea}[1][]{enhanced, breakable, colback=primary!10, colframe=primary,
+    boxrule=1.4pt, arc=10pt, left=12pt, right=12pt, top=10pt, bottom=10pt,
+    fontupper=\itshape, borderline west={4pt}{0pt}{secondary}, #1}
+\else
+  \universumplainboxes
+\fi
+
+
+% ============================================================
+%   ТИТУЛЬНЫЙ ЛИСТ: \makelecturetitle[доп. данные]{Тема}
+%   Тип документа — \universumdoctype (подставляет приложение)
+% ============================================================
+\newif\ifuniversumtikz
+\IfFileExists{tikz.sty}{\universumtikztrue}{\universumtikzfalse}
+\ifuniversumtikz
+  \newcommand{\makelecturetitle}[2][]{%
+  \begin{titlepage}
+  \centering
+  \begin{tikzpicture}[remember picture, overlay]
+    \fill[primary] (current page.north west) rectangle
+      ([yshift=-5cm]current page.north east);
+    \fill[secondary] ([yshift=-5cm]current page.north west) rectangle
+      ([yshift=-5.25cm]current page.north east);
+    \fill[accent] ([yshift=-5.25cm]current page.north west) rectangle
+      ([yshift=-5.38cm]current page.north east);
+    \fill[white, opacity=0.08]
+      ([xshift=2cm, yshift=-2cm]current page.north east) circle (4cm);
+    \fill[white, opacity=0.06]
+      ([xshift=14cm, yshift=-4cm]current page.north west) circle (2.5cm);
+  \end{tikzpicture}%
+  \vspace*{1.1cm}
+  {\color{white}\sffamily\Large\bfseries\universumdoctype\par}
+  \vspace{2.1cm}
+  {\color{primary}\Huge\bfseries #2\par}
+  \vspace{0.5cm}
+  {\color{secondary}\rule{6cm}{1.2pt}\par}
+  \ifstrempty{#1}{}{%
+    \vspace{0.6cm}%
+    {\color{textgray}\large\sffamily #1\par}%
+  }%
+  \vfill
+  {\color{textgray}\large\iconCal \today\par}
+  \vspace{1cm}
+  \end{titlepage}
+  }
+\else
+  \newcommand{\makelecturetitle}[2][]{%
+  \begin{titlepage}
+  \centering
+  {\color{primary}\rule{\linewidth}{3pt}}\par
+  \vspace{1.6cm}
+  {\color{primary}\sffamily\Large\bfseries\universumdoctype\par}
+  \vspace{1.8cm}
+  {\Huge\bfseries #2\par}
+  \vspace{0.5cm}
+  {\color{secondary}\rule{6cm}{1.2pt}\par}
+  \ifstrempty{#1}{}{%
+    \vspace{0.6cm}%
+    {\color{textgray}\large\sffamily #1\par}%
+  }%
+  \vfill
+  {\color{textgray}\large\iconCal \today\par}
+  \vspace{1cm}
+  \end{titlepage}
+  }
+\fi
+
+
+% ---------- заголовки ----------
+\titleformat{\section}
+  {\Large\bfseries\sffamily\color{primary}}
+  {\thesection.}{0.6em}{}
+  [\vspace{-0.4em}{\color{secondary}\rule{\linewidth}{1.6pt}}]
+\titleformat{\subsection}
+  {\large\bfseries\sffamily\color{accent}}
+  {\color{secondary}\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\sffamily\color{primary}}
+  {\thesubsubsection}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.6em}{0.9em}
+\titlespacing*{\subsection}{0pt}{1.2em}{0.5em}
+
+% ---------- списки ----------
+\setlist[itemize]{label={\color{secondary}\iconRight}, leftmargin=1.4em, itemsep=2pt}
+\setlist[enumerate]{label={\color{primary}\bfseries\arabic*.}, leftmargin=1.6em, itemsep=2pt}
+\setlist[enumerate,2]{label={\alph*)}, leftmargin=1.6em, itemsep=1pt}
+
+
+% ---------- колонтитулы ----------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{accent}\leaders\hrule height \headrulewidth\hfill}}
+\fancyhead[L]{\footnotesize\color{primary}\sffamily\bfseries\universumdoctype}
+\fancyhead[R]{\footnotesize\color{secondary}\sffamily\thepage}
+\fancyfoot[C]{\footnotesize\color{textgray}\itshape Universum}
+
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=primary,
+  urlcolor=secondary,
+  citecolor=accent
+}
+
+\begin{document}
+
+\makelecturetitle{Налогообложение в России: новые законы 2026}
+
+\section*{Инструкция}
+В тесте 2 варианта по 5 вопросов. В каждом вопросе один верный ответ. Время — 40 минут.
+
+\clearpage
+\section*{Вариант 1}
+
+\begin{enumerate}
+  \item Какой налог относится к федеральным?
+  \begin{enumerate}
+    \item[а)] НДФЛ
+    \item[б)] земельный налог
+    \item[в)] налог на имущество физических лиц
+    \item[г)] торговый сбор
+  \end{enumerate}
+  \item С какого года действует единый срок уплаты налогов?
+  \begin{enumerate}
+    \item[а)] с 2022
+    \item[б)] с 2023
+    \item[в)] с 2024
+    \item[г)] с 2026
+  \end{enumerate}
+  \item Что такое налоговый вычет?
+  \begin{enumerate}
+    \item[а)] возврат части уплаченного налога
+    \item[б)] штраф
+    \item[в)] пеня
+    \item[г)] льгота по имуществу
+  \end{enumerate}
+  \item Кто является налоговым агентом по НДФЛ?
+  \begin{enumerate}
+    \item[а)] работодатель
+    \item[б)] банк
+    \item[в)] сам работник
+    \item[г)] суд
+  \end{enumerate}
+  \item Какая ставка НДС действует в России по умолчанию?
+  \begin{enumerate}
+    \item[а)] 10\%
+    \item[б)] 20\%
+    \item[в)] 18\%
+    \item[г)] 0\%
+  \end{enumerate}
+\end{enumerate}
+
+\clearpage
+\section*{Вариант 2}
+
+\begin{enumerate}
+  \item Какой налог относится к региональным?
+  \begin{enumerate}
+    \item[а)] НДФЛ
+    \item[б)] транспортный налог
+    \item[в)] НДС
+    \item[г)] водный налог
+  \end{enumerate}
+  \item Что происходит при нарушении срока подачи декларации?
+  \begin{enumerate}
+    \item[а)] штраф
+    \item[б)] вычет
+    \item[в)] возврат
+    \item[г)] отсрочка
+  \end{enumerate}
+  \item Сколько уровней в налоговой системе России?
+  \begin{enumerate}
+    \item[а)] один
+    \item[б)] два
+    \item[в)] три
+    \item[г)] четыре
+  \end{enumerate}
+  \item Что такое налоговая база?
+  \begin{enumerate}
+    \item[а)] стоимостная характеристика объекта налога
+    \item[б)] ставка налога
+    \item[в)] срок уплаты
+    \item[г)] льгота
+  \end{enumerate}
+  \item Кто устанавливает федеральные налоги?
+  \begin{enumerate}
+    \item[а)] Правительство РФ
+    \item[б)] Государственная Дума
+    \item[в)] Минфин
+    \item[г)] ФНС
+  \end{enumerate}
+\end{enumerate}
+
+\clearpage
+\section*{Ключ ответов}
+
+\subsection*{Вариант 1}
+\begin{tabularx}{0.8\linewidth}{cX}
+\toprule
+№ & Ответ \\
+\midrule
+1 & а \\
+2 & б \\
+3 & а \\
+4 & а \\
+5 & б \\
+\bottomrule
+\end{tabularx}
+
+
+\clearpage
+\subsection*{Вариант 2}
+\begin{tabularx}{0.8\linewidth}{cX}
+\toprule
+№ & Ответ \\
+\midrule
+1 & б \\
+2 & а \\
+3 & в \\
+4 & а \\
+5 & б \\
+\bottomrule
+\end{tabularx}
+
+\end{document}

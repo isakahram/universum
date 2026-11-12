@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 class _Widget:
-    """Минимальный «виджет»: запоминает аргументы и умеет pack/configure/get/set."""
+    """Минимальный «виджет»: запоминает аргументы, привязки и буфер обмена."""
 
     def __init__(self, master=None, **kwargs):
         self._kwargs = dict(kwargs)
@@ -25,6 +25,9 @@ class _Widget:
         self._visible = False
         self._alive = True
         self._command = kwargs.get("command")
+        self._bindings: dict[str, object] = {}
+        self._clipboard = ""
+        self._sel: tuple[str, str] | None = None
         if hasattr(master, "_children"):
             master._children.append(self)
 
@@ -59,7 +62,8 @@ class _Widget:
     def cget(self, key: str):
         return self._kwargs.get(key)
 
-    def bind(self, *args, **kwargs):
+    def bind(self, sequence=None, command=None, add=True):
+        self._bindings[sequence] = command
         return "binding"
 
     def unbind(self, *args, **kwargs):
@@ -76,6 +80,55 @@ class _Widget:
 
     def delete(self, *args):
         self._value = ""
+
+    # -- выделение и буфер обмена (горячие клавиши) ------------------------
+    def tag_ranges(self, tag):
+        if tag == "sel" and self._sel:
+            return self._sel
+        return ()
+
+    def tag_add(self, tag, start, end=None):
+        if tag == "sel":
+            self._sel = (start, end)
+
+    def tag_remove(self, *args):
+        self._sel = None
+
+    def clipboard_clear(self):
+        self._clipboard = ""
+
+    def clipboard_append(self, text):
+        self._clipboard += text
+
+    def clipboard_get(self):
+        if not self._clipboard:
+            raise RuntimeError("буфер обмена пуст")
+        return self._clipboard
+
+    def select_present(self):
+        return self._sel is not None
+
+    def select_range(self, start, end):
+        self._sel = (str(start), str(end))
+
+    def icursor(self, index):
+        return len(str(self._value))
+
+    def index(self, index):
+        if index == "sel.first":
+            return 0
+        if index == "sel.last":
+            return len(str(self._value))
+        return 0
+
+    def edit_undo(self):
+        self._value = ""
+
+    def edit_redo(self):
+        return None
+
+    def mark_set(self, *args):
+        return None
 
     # -- события/жизненный цикл -------------------------------------------
     def after(self, delay, callback=None, *args):
@@ -169,12 +222,6 @@ class _Widget:
         return None
 
     def iconify(self):
-        return None
-
-    def clipboard_clear(self):
-        return None
-
-    def clipboard_append(self, *args):
         return None
 
     def start(self):
@@ -407,3 +454,146 @@ def test_volume_label_pluralisation():
         assert gui._plural_pages(1) == "страница"
         assert gui._plural_pages(3) == "страницы"
         assert gui._plural_pages(25) == "страниц"
+
+
+# ---------------------------------------------------------------------------
+# Горячие клавиши: должны работать и на русской раскладке
+# ---------------------------------------------------------------------------
+
+class _Event:
+    """Минимальное событие Tk: нужен только keysym."""
+
+    def __init__(self, keysym: str) -> None:
+        self.keysym = keysym
+
+
+def _fire(widget, sequence: str, keysym: str):
+    handler = widget._bindings.get(sequence)
+    assert handler is not None, f"нет привязки {sequence}"
+    return handler(_Event(keysym))
+
+
+def test_hotkey_letter_maps_russian_keysyms():
+    with _gui_module() as gui:
+        assert gui._hotkey_letter("Cyrillic_es") == "c"      # с
+        assert gui._hotkey_letter("Cyrillic_em") == "v"      # м
+        assert gui._hotkey_letter("Cyrillic_che") == "x"     # ч
+        assert gui._hotkey_letter("Cyrillic_ef") == "a"      # ф
+        assert gui._hotkey_letter("Cyrillic_ya") == "z"      # я
+        assert gui._hotkey_letter("c") == "c"
+        assert gui._hotkey_letter("F5") is None
+
+
+def test_copy_hotkey_works_on_russian_layout():
+    with _gui_module() as gui:
+        app = _app(gui)
+        box = app.request_box
+        box.set_value("Квантовая механика")
+        box._sel = ("1.0", "1.18")
+
+        result = _fire(box, "<Control-KeyPress>", "Cyrillic_es")  # Ctrl+С
+        assert result == "break"
+        assert box._clipboard == "Квантовая механика"
+
+        # латинская раскладка тоже работает
+        box._clipboard = ""
+        assert _fire(box, "<Control-KeyPress>", "c") == "break"
+        assert box._clipboard == "Квантовая механика"
+
+
+def test_paste_hotkey_works_on_russian_layout():
+    with _gui_module() as gui:
+        app = _app(gui)
+        box = app.request_box
+        box.set_value("")
+        box._clipboard = "вставленный текст"
+        assert _fire(box, "<Control-KeyPress>", "Cyrillic_em") == "break"  # Ctrl+М
+        assert "вставленный текст" in str(box._value)
+
+
+def test_select_all_and_cut_hotkeys():
+    with _gui_module() as gui:
+        app = _app(gui)
+        box = app.request_box
+        box.set_value("текст")
+        assert _fire(box, "<Control-KeyPress>", "Cyrillic_ef") == "break"  # Ctrl+Ф
+        assert box._sel == ("1.0", "end-1c")
+        assert _fire(box, "<Control-KeyPress>", "Cyrillic_che") == "break"  # Ctrl+Ч
+        assert box._clipboard == "текст"
+
+
+def test_entry_hotkeys_work_on_russian_layout():
+    with _gui_module() as gui:
+        app = _app(gui)
+        entry = gui.ctk.CTkEntry(app)
+        gui.install_entry_hotkeys(entry)
+        entry._value = "sk-secret-key"
+        entry.select_range(0, "end")
+
+        assert _fire(entry, "<Control-KeyPress>", "Cyrillic_es") == "break"
+        assert entry._clipboard == "sk-secret-key"
+
+        entry._clipboard = "sk-new"
+        entry._sel = None
+        assert _fire(entry, "<Control-KeyPress>", "Cyrillic_em") == "break"
+        assert "sk-new" in str(entry._value)
+
+
+def test_ctrl_enter_starts_generation():
+    with _gui_module() as gui:
+        app = _app(gui)
+        app.request_box.set_value("Лекция по физике")
+        assert app._bindings.get("<Control-Return>") is not None
+        assert app._on_generate_shortcut(_Event("Return")) == "break"
+        assert app._worker is not None
+        app._worker.join(timeout=5)
+        app._poll_queue()
+        assert app._result_pdf is not None
+
+
+def test_test_volume_maps_questions_and_variants():
+    with _gui_module() as gui:
+        from universum.config import DocType
+
+        app = _app(gui)
+        app.doc_menu.set(DocType.TEST.label_ru)
+        app._on_type_changed()
+        app.volume_slider.set(7)
+        assert app.variants_slider is not None
+        app.variants_slider.set(5)
+        app._on_volume_changed()
+
+        request = app._collect_request()
+        assert request.doc_type is DocType.TEST
+        assert request.volume.questions == 7
+        assert request.volume.variants == 5
+        assert "7 вопросов" in app.volume_value._kwargs["text"]
+        assert "5 вариантов" in app.volume_value._kwargs["text"]
+
+
+def test_new_styles_are_available_in_menu():
+    with _gui_module() as gui:
+        from universum.config import Style
+
+        app = _app(gui)
+        values = app.style_menu._kwargs["values"]
+        assert values == [style.label_ru for style in Style]
+        assert "Без стиля" not in values
+        for label in ("Строгий", "Красочный / креативный", "Неон", "Природа", "Современный минимализм"):
+            assert label in values
+
+
+def test_save_dialog_suggests_type_and_topic_name(tmp_path):
+    """В диалоге сохранения сразу подставлено имя «Тип — Тема»."""
+    with _gui_module() as gui:
+        app = _app(gui)
+        produced = tmp_path / "Тест — Квантовая механика.pdf"
+        produced.write_bytes(b"%PDF-1.4 fake")
+        app._result_pdf = produced
+
+        captured: dict[str, object] = {}
+        gui.filedialog.asksaveasfilename = lambda **kwargs: captured.update(kwargs) or ""
+        app._on_save()
+
+        assert captured["initialfile"] == "Тест — Квантовая механика.pdf"
+        assert captured["defaultextension"] == ".pdf"

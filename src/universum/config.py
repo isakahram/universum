@@ -63,18 +63,22 @@ class DocType(str, Enum):
 
 
 class Style(str, Enum):
-    """Стиль оформления."""
+    """Стиль оформления (все стили — цветные блоки tcolorbox, кроме строгого)."""
 
     STRICT = "strict"
     COLORFUL = "colorful"
-    PLAIN = "plain"
+    NEON = "neon"
+    NATURE = "nature"
+    MINIMAL = "minimal"
 
     @property
     def label_ru(self) -> str:
         return {
             Style.STRICT: "Строгий",
             Style.COLORFUL: "Красочный / креативный",
-            Style.PLAIN: "Без стиля",
+            Style.NEON: "Неон",
+            Style.NATURE: "Природа",
+            Style.MINIMAL: "Современный минимализм",
         }[self]
 
 

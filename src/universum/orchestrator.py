@@ -22,10 +22,26 @@ from .prompts import (
     detect_language,
     wrap_document,
 )
-from .utils import UniversumError, extract_document_body, get_logger, log_event, validate_latex
+from .utils import (
+    UniversumError,
+    count_variants,
+    ensure_page_breaks,
+    plural_ru,
+    extract_document_body,
+    get_logger,
+    log_event,
+    normalize_title_call,
+    suggest_document_name,
+    validate_latex,
+)
 from .web_search import web_search
 
 ProgressFn = Callable[[str], None]
+
+
+def _test_layout(body: str, doc_type: DocType) -> str:
+    """Для тестов гарантировать новые страницы у вариантов и ключа ответов."""
+    return ensure_page_breaks(body) if doc_type == DocType.TEST else body
 
 
 @dataclass
@@ -157,12 +173,44 @@ class Orchestrator:
         _p("Генерация документа нейросетью…")
         _check_cancel()
         raw = self.llm.generate(SYSTEM_PROMPT, user_prompt, progress=_p, cancel_event=cancel_event)
+        body = extract_document_body(raw)
+
+        # Тест: следим, чтобы вариантов было ровно столько, сколько выбрали
+        if req.doc_type == DocType.TEST and body:
+            expected = req.volume.variants
+            found = count_variants(body)
+            if found != expected:
+                expected_text = f"{expected} {plural_ru(expected, 'вариант', 'варианта', 'вариантов')}"
+                found_text = f"{found} {plural_ru(found, 'вариант', 'варианта', 'вариантов')}"
+                _p(f"Получилось {found_text} вместо {expected_text} — прошу нейросеть переделать…")
+                _check_cancel()
+                retry_prompt = (
+                    user_prompt
+                    + f"\n\nИСПРАВЛЕНИЕ: в предыдущем ответе было {found_text}, а нужно ровно "
+                    + f"{expected_text}. Верни тело заново: ровно {expected_text}, каждый с новой "
+                    + f"страницы (\\clearpage) и заголовком «Вариант 1»…«Вариант {expected}», "
+                    + f"по {req.volume.questions} вопросов в каждом, затем ключ ответов "
+                    + "отдельным разделом с новой страницы."
+                )
+                retried = self.llm.generate(
+                    SYSTEM_PROMPT, retry_prompt, progress=_p, cancel_event=cancel_event
+                )
+                retried_body = extract_document_body(retried)
+                if retried_body:
+                    retried_count = count_variants(retried_body)
+                    # берём ответ, который ближе к запрошенному числу вариантов
+                    if abs(retried_count - expected) < abs(found - expected):
+                        body = retried_body
         # Модель отдаёт только тело; преамбулу и оформление задаёт шаблон стиля,
         # поэтому сломать пакеты/кодировку она не может.
-        body = extract_document_body(raw)
         if not body:
             raise UniversumError("Нейросеть не вернула LaTeX-код. Попробуйте ещё раз.")
-        latex_code = wrap_document(body, req.style, language=language)
+        # Титул приводим к безопасному виду: тема + только явно заданные данные,
+        # тип документа подставляет преамбула (\universumdoctype).
+        body = normalize_title_call(body, req.doc_type.label_ru, request_text)
+        # ключ ответов и каждый вариант — с новой страницы (требование UX)
+        body = _test_layout(body, req.doc_type)
+        latex_code = wrap_document(body, req.style, language=language, doc_type=req.doc_type)
         problems = validate_latex(latex_code)
         if problems:
             self.logger.warning("Generated LaTeX has issues: %s", problems)
@@ -182,7 +230,15 @@ class Orchestrator:
             cancel_event=cancel_event,
             # Ремонт возвращает тело — собираем документ заново с нашей преамбулой
             postprocess=lambda fixed_raw: wrap_document(
-                extract_document_body(fixed_raw), req.style, language=language
+                _test_layout(
+                    normalize_title_call(
+                        extract_document_body(fixed_raw), req.doc_type.label_ru, request_text
+                    ),
+                    req.doc_type,
+                ),
+                req.style,
+                language=language,
+                doc_type=req.doc_type,
             ),
             prompt_view=extract_document_body,
         )
@@ -190,7 +246,11 @@ class Orchestrator:
         # Копируем PDF в стабильное место (tempdir может очиститься)
         out_dir = self.config.temp_dir / "output"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / "universum_document.pdf"
+        # Имя файла: «Тип документа — Тема» (тема из титула, иначе из запроса)
+        safe_name = suggest_document_name(
+            req.doc_type.label_ru, request_text=request_text, latex_code=latex_code
+        )
+        out_path = out_dir / safe_name
         shutil.copyfile(compiled.pdf_path, out_path)
         _p("Готово!")
         log_event(f"Generation done pdf={out_path} bytes={out_path.stat().st_size}")

@@ -30,6 +30,7 @@
 \fi
 \usepackage[english,russian]{babel}
 \usepackage[margin=2.2cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{etoolbox}   % \ifstrempty для необязательных данных титула
 \usepackage{microtype}
 \usepackage{amsmath,amssymb}
 \usepackage{amsthm}   % \qed и окружение proof
@@ -65,6 +66,10 @@
 % ---------- вспомогательные команды ----------
 \newcommand{\term}[1]{\textcolor{primary}{\textbf{#1}}}
 \newcommand{\hl}[1]{\colorbox{highlight!60}{#1}}
+
+% ---------- тип документа задаёт приложение, а не модель ----------
+% Значение подставляет build_preamble() из выбора пользователя.
+\newcommand{\universumdoctype}{Лекция}
 
 
 % ---------- иконки ----------
@@ -124,23 +129,26 @@
 
 
 % ============================================================
-%   ТИТУЛЬНЫЙ ЛИСТ: \makelecturetitle{Курс}{Семестр}{Лекция}{Тема}
+%   ТИТУЛЬНЫЙ ЛИСТ: \makelecturetitle[доп. данные]{Тема}
+%   Тип документа — \universumdoctype (подставляет приложение)
 % ============================================================
-\newcommand{\makelecturetitle}[4]{%
+\newcommand{\makelecturetitle}[2][]{%
 \begin{titlepage}
 \centering
 {\color{primary}\rule{\linewidth}{2pt}}\par
-\vspace{1.5cm}
-{\Huge\bfseries\sffamily #3\par}
+\vspace{1.6cm}
+{\Huge\bfseries\sffamily #2\par}
 \vspace{0.6cm}
-{\Large\sffamily #4\par}
-\vspace{2.5cm}
-{\Large #1\par}
-\vspace{0.3cm}
-{\large #2\par}
-\vspace{0.5cm}
-{\large \today\par}
+{\color{secondary}\rule{5cm}{0.8pt}}\par
+\vspace{0.7cm}
+{\Large\sffamily\universumdoctype\par}
+\ifstrempty{#1}{}{%
+  \vspace{0.6cm}%
+  {\normalsize\color{textgray} #1\par}%
+}
 \vfill
+{\large \today\par}
+\vspace{0.6cm}
 {\color{primary}\rule{\linewidth}{0.6pt}}
 \end{titlepage}
 }
@@ -159,13 +167,14 @@
 % ---------- списки ----------
 \setlist[itemize]{leftmargin=1.4em, itemsep=2pt}
 \setlist[enumerate]{leftmargin=1.6em, itemsep=2pt}
+\setlist[enumerate,2]{label={\alph*)}, leftmargin=1.6em, itemsep=1pt}
 
 
 % ---------- колонтитулы ----------
 \pagestyle{fancy}
 \fancyhf{}
 \renewcommand{\headrulewidth}{0.4pt}
-\fancyhead[L]{\footnotesize Учебный материал}
+\fancyhead[L]{\footnotesize\universumdoctype}
 \fancyhead[R]{\footnotesize\thepage}
 
 
@@ -179,49 +188,56 @@
 
 \begin{document}
 
-\makelecturetitle
-  {Дискретная математика}
-  {1 семестр / Модуль 1}
-  {Лекция 1}
-  {Множества и мощность: введение в тему}
+\makelecturetitle{Множества и мощность: введение в тему}
+
+\tableofcontents
 
 \section{Введение}
 
-Добро пожаловать на лекцию! Здесь мы рассмотрим \term{ключевые понятия},
-которые станут основой дальнейшего изучения материала.
-
-\begin{keyidea}
-Главная мысль лекции: \textbf{форма следует за функцией} — стиль и структура
-материала должны помогать усвоению, а не отвлекать.
-\end{keyidea}
-
-\section{Основные определения}
+\term{Множество} — это совокупность объектов, рассматриваемых как единое целое.
+Мощность множества $|A|$ показывает, сколько в нём элементов.
 
 \begin{definition}
-\term{Определение.} Пусть $X$ — множество. Тогда \emph{мощностью}
-множества $|X|$ называется количество его элементов.
+Множества $A$ и $B$ называются \term{равномощными}, если между ними существует
+биекция: каждому элементу $A$ соответствует ровно один элемент $B$ и наоборот.
 \end{definition}
 
 \begin{theorem}
-Для любых множеств $A$ и $B$ выполняется:
-\[
-  |A \cup B| = |A| + |B| - |A \cap B|.
-\]
+Для любых конечных множеств $A$ и $B$ справедлива формула включений-исключений:
+\[ |A \cup B| = |A| + |B| - |A \cap B|. \]
 \end{theorem}
 
+\begin{proof}
+Каждый элемент $A \cap B$ посчитан дважды в сумме $|A| + |B|$, поэтому его нужно
+вычесть один раз. Остальные элементы входят ровно в одно из множеств.
+\qed
+\end{proof}
+
+\section{Примеры и задачи}
+
 \begin{example}
-Пусть $A = \{1,2,3\}$ и $B = \{3,4\}$. Тогда:
-\[
-  |A \cup B| = 4 = 3 + 2 - 1.
-\]
+Мощность множества цифр $\{0, 1, \ldots, 9\}$ равна 10, а множества гласных
+русского алфавита — 10.
 \end{example}
 
 \begin{important}
-Не путайте \hl{мощность} с количеством \emph{подмножеств} — это разные
-характеристики множества!
+Не путайте мощность множества с мощностью системы множеств: $|A|$ и $|\mathcal{P}(A)|$
+считают разные вещи. Для конечного $A$ верно $|\mathcal{P}(A)| = 2^{|A|}$.
 \end{important}
 
-\section{Примеры и задачи}
+\begin{table}[h]
+\centering
+\begin{tabularx}{0.8\linewidth}{lX}
+\toprule
+Операция & Смысл \\
+\midrule
+$A \cup B$ & объединение: элементы хотя бы одного множества \\
+$A \cap B$ & пересечение: общие элементы \\
+$A \setminus B$ & элементы $A$, которых нет в $B$ \\
+\bottomrule
+\end{tabularx}
+\caption{Основные операции над множествами}
+\end{table}
 
 \begin{enumerate}
   \item Найдите мощность множества $\{x \in \mathbb{N} \mid x < 10\}$.
@@ -229,17 +245,11 @@
   \item Приведите практический пример из вашей предметной области.
 \end{enumerate}
 
-\begin{proof}
-Докажем формулу включений-исключений для двух множеств: каждый элемент
-$A \cup B$ считается ровно один раз.
-\qed
-\end{proof}
-
 \section{Выводы}
 
 \begin{keyidea}
 Мы освоили базовые определения и научились применять их на практике.
-На следующей лекции перейдём к более сложным конструкциям.
+На следующем занятии перейдём к счётным и несчётным множествам.
 \end{keyidea}
 
 \end{document}

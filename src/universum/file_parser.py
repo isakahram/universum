@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Limits, get_config
-from .utils import FileParseError, get_logger, log_event
+from .utils import FileParseError, log_event
 
 
 def _check_size(path: Path, limits: Limits) -> None:
