@@ -44,6 +44,7 @@ from .config import (
     LlmSettings,
     Style,
     Volume,
+    VolumeSize,
     is_localhost_url,
     load_llm_settings,
     mask_key,
@@ -835,28 +836,46 @@ class UniversumApp(ctk.CTk):
         volume.pack(side="right", anchor="n")
         self.volume_title = ctk.CTkLabel(
             volume,
-            text="Объём",
+            text="Объём документа",
             font=ctk.CTkFont(size=12),
             text_color=COLOR_MUTED,
             anchor="w",
         )
         self.volume_title.pack(anchor="w")
+        # Абстрактный объём (Маленький/Средний/Большой) вместо точных страниц:
+        # нейросеть следует бюджету слов, а не «5 страницам».
+        self.volume_seg = ctk.CTkSegmentedButton(
+            volume,
+            values=[size.label_ru for size in VolumeSize],
+            width=220,
+            height=36,
+            corner_radius=9,
+            fg_color=COLOR_CARD,
+            selected_color=COLOR_ACCENT,
+            selected_hover_color=COLOR_ACCENT_HOVER,
+            unselected_color=COLOR_CARD,
+            unselected_hover_color=COLOR_BG,
+            text_color=COLOR_TEXT,
+            command=self._on_volume_changed,
+        )
+        self.volume_seg.set(VolumeSize.MEDIUM.label_ru)
+        self.volume_seg.pack(anchor="w", pady=(10, 0))
+        # Слайдер — только для теста («вопросов в каждом варианте»).
         self.volume_slider = ctk.CTkSlider(
             volume,
-            from_=1,
-            to=30,
-            number_of_steps=29,
+            from_=5,
+            to=50,
+            number_of_steps=45,
             width=220,
             progress_color=COLOR_ACCENT,
             button_color=COLOR_ACCENT,
             button_hover_color=COLOR_ACCENT_HOVER,
             command=self._on_volume_changed,
         )
-        self.volume_slider.set(5)
-        self.volume_slider.pack(anchor="w", pady=(10, 0))
+        self.volume_slider.set(10)
         self.volume_value = ctk.CTkLabel(
             volume,
-            text="5 страниц",
+            text="«Средний» — ≈1500 слов (3–5 страниц)",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLOR_TEXT,
             anchor="w",
@@ -1092,11 +1111,13 @@ class UniversumApp(ctk.CTk):
         return Style.STRICT
 
     def _on_type_changed(self, _value: str | None = None) -> None:
-        """У теста объём — вопросы, у остальных — страницы."""
+        """У теста объём — вопросы и варианты, у остальных — размер документа."""
         if self._current_doc_type() == DocType.TEST:
             self.volume_title.configure(text="Вопросов в каждом варианте")
+            self.volume_seg.pack_forget()
             self.volume_slider.configure(from_=5, to=50, number_of_steps=45)
             self.volume_slider.set(10)
+            self.volume_slider.pack(anchor="w", pady=(10, 0))
             self.variants_row.pack(side="right", anchor="n", padx=(0, 20))
             if self.variants_slider is None:
                 ctk.CTkLabel(
@@ -1120,9 +1141,9 @@ class UniversumApp(ctk.CTk):
                 self.variants_slider.set(2)
                 self.variants_slider.pack(anchor="w", pady=(10, 0))
         else:
-            self.volume_title.configure(text="Объём (страниц)")
-            self.volume_slider.configure(from_=1, to=30, number_of_steps=29)
-            self.volume_slider.set(5)
+            self.volume_title.configure(text="Объём документа")
+            self.volume_slider.pack_forget()
+            self.volume_seg.pack(anchor="w", pady=(10, 0))
             self.variants_row.pack_forget()
         self._on_volume_changed()
 
@@ -1131,7 +1152,15 @@ class UniversumApp(ctk.CTk):
         style = self._current_style()
         self.status_label.configure(text=f"Стиль: {style.label_ru.lower()}", text_color=COLOR_MUTED)
 
-    def _on_volume_changed(self, _value: float | None = None) -> None:
+    def _current_size(self) -> VolumeSize:
+        """Выбранный объём документа (Маленький/Средний/Большой)."""
+        label = self.volume_seg.get()
+        for size in VolumeSize:
+            if size.label_ru == label:
+                return size
+        return VolumeSize.MEDIUM
+
+    def _on_volume_changed(self, _value=None) -> None:
         if self._current_doc_type() == DocType.TEST:
             questions = int(round(self.volume_slider.get()))
             variants = int(round(self.variants_slider.get())) if self.variants_slider else 2
@@ -1140,8 +1169,10 @@ class UniversumApp(ctk.CTk):
                 f"{variants} {_plural_variants(variants)}"
             )
         else:
-            pages = int(round(self.volume_slider.get()))
-            self.volume_value.configure(text=f"{pages} {_plural_pages(pages)}")
+            size = self._current_size()
+            self.volume_value.configure(
+                text=f"«{size.label_ru}» — ≈{size.target_words} слов ({size.pages_label})"
+            )
 
     # -- файл -------------------------------------------------------------
 
@@ -1167,13 +1198,12 @@ class UniversumApp(ctk.CTk):
         """Собрать запрос для оркестратора (логика не менялась)."""
         dt = self._current_doc_type()
         st = self._current_style()
-        pages = int(round(self.volume_slider.get())) if dt != DocType.TEST else 5
         questions = (
             int(round(self.volume_slider.get())) if dt == DocType.TEST else 10
         )
         variants = int(round(self.variants_slider.get())) if self.variants_slider else 4
         volume = Volume(
-            pages=max(1, min(30, pages)),
+            size=self._current_size(),
             questions=max(1, min(50, questions)),
             variants=max(2, min(6, variants)),
         )
@@ -1355,16 +1385,18 @@ class UniversumApp(ctk.CTk):
         win.geometry("620x560")
         win.configure(fg_color=COLOR_BG)
         win.transient(self)
+        # Окно НЕмодальное: grab_set не вызываем — пока настройки открыты,
+        # главным окном можно пользоваться (копировать текст, генерировать).
 
-        def _grab() -> None:
-            """Модальность включаем после отрисовки, иначе Tcl ругается."""
+        def _focus() -> None:
+            """Просто поднять окно наверх после отрисовки (без захвата ввода)."""
             try:
-                win.grab_set()
+                win.lift()
                 win.focus_force()
             except Exception:  # pragma: no cover
                 pass
 
-        win.after(120, _grab)
+        win.after(120, _focus)
         win.protocol("WM_DELETE_WINDOW", win.destroy)
         self._settings_win = win
         self._dialogs.append(win)
@@ -1605,11 +1637,6 @@ def _plural_questions(n: int) -> str:
 def _plural_variants(n: int) -> str:
     """Склонение слова «вариант» (тест)."""
     return plural_ru(n, "вариант", "варианта", "вариантов")
-
-
-def _plural_pages(n: int) -> str:
-    """Склонение слова «страница» для подписи слайдера."""
-    return plural_ru(n, "страница", "страницы", "страниц")
 
 
 def run() -> None:

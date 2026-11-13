@@ -38,7 +38,6 @@ from .sections import (
     parse_plan,
     section_count,
     split_titles,
-    target_words,
     trim_to_words,
 )
 from .utils import (
@@ -63,7 +62,9 @@ ProgressFn = Callable[[str], None]
 
 # С какого объёма документ собирается по разделам (короткие — за один запрос):
 # длинный ответ сервис обрывает по лимиту токенов, и LaTeX остаётся незакрытым.
-_SECTIONAL_MIN_PAGES = 3
+# С какого бюджета слов дробим документ на разделы (≈3 страницы по 420 слов):
+# «Маленький» (500) — одним запросом + правка объёма, «Средний»/«Большой» — по разделам.
+_SECTIONAL_MIN_WORDS = 1200
 
 # Допустимое отклонение объёма от ползунка (доли).
 _VOLUME_LOW = 0.65
@@ -227,7 +228,7 @@ class Orchestrator:
 
         # Длинный документ собираем по разделам: так ответ не обрывается по лимиту
         # токенов, объём управляем и LaTeX почти никогда не ломается.
-        sectional = req.doc_type != DocType.TEST and req.volume.pages >= _SECTIONAL_MIN_PAGES
+        sectional = req.doc_type != DocType.TEST and req.volume.words >= _SECTIONAL_MIN_WORDS
         if sectional:
             body = self._generate_sectional(ctx, req, request_text, _llm, _p, _check_cancel)
             raw = body
@@ -371,9 +372,8 @@ class Orchestrator:
         Returns:
             Тело документа (титул + разделы).
         """
-        pages = req.volume.pages
-        total_words = target_words(pages)
-        wanted = section_count(pages)
+        total_words = req.volume.words
+        wanted = section_count(total_words)
 
         progress("План разделов…")
         check_cancel()
@@ -386,7 +386,7 @@ class Orchestrator:
         except Exception as e:  # сеть/парсинг: план — не критичная часть
             self.logger.warning("Plan generation failed: %s", e)
         if len(titles) < 2:
-            titles = fallback_plan(req.doc_type.value, pages, ctx.structure_text)
+            titles = fallback_plan(req.doc_type.value, total_words, ctx.structure_text)
             log_event(f"Plan fallback used sections={len(titles)}")
 
         per_section = max(MIN_SECTION_WORDS, total_words // max(1, len(titles)))
@@ -422,14 +422,14 @@ class Orchestrator:
 
         theme = topic_from_request(request_text) or titles[0]
         title_call = r"\makelecturetitle{" + escape_latex_text(theme) + "}"
-        with_toc = pages >= 4 and req.doc_type != DocType.HOMEWORK
+        with_toc = total_words >= 1500 and req.doc_type != DocType.HOMEWORK
         body = assemble_document(title_call, chunks, with_toc=with_toc)
 
         body = self._balance_sections(ctx, req, body, llm_call, progress, check_cancel)
         words = count_words(body)
         log_event(
             f"Sectional generation sections={len(chunks)} words={words} "
-            f"target={total_words} pages={pages}"
+            f"target={total_words} size={req.volume.size.value}"
         )
         return body
 
@@ -458,7 +458,7 @@ class Orchestrator:
         Returns:
             Тело, близкое к целевому объёму.
         """
-        total_words = target_words(ctx.volume.pages)
+        total_words = ctx.volume.words
         words = count_words(body)
         if words > total_words * _VOLUME_HIGH:
             trimmed = trim_to_words(body, int(total_words * 1.35))
@@ -527,7 +527,7 @@ class Orchestrator:
         Returns:
             Тело — исходное или перегенерированное (что ближе к цели).
         """
-        total_words = target_words(ctx.volume.pages)
+        total_words = ctx.volume.words
         words = count_words(body)
         if total_words * _VOLUME_LOW <= words <= total_words * _VOLUME_HIGH:
             return body

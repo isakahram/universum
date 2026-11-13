@@ -28,6 +28,7 @@ class _Widget:
         self._bindings: dict[str, object] = {}
         self._clipboard = ""
         self._sel: tuple[str, str] | None = None
+        self._grabs = 0  # сколько раз окно захватывало ввод (модальность)
         if hasattr(master, "_children"):
             master._children.append(self)
 
@@ -208,7 +209,7 @@ class _Widget:
         return None
 
     def grab_set(self):
-        return None
+        self._grabs += 1
 
     def grab_release(self):
         return None
@@ -260,6 +261,7 @@ def _install_stubs() -> dict[str, types.ModuleType]:
         "CTkTextbox",
         "CTkEntry",
         "CTkOptionMenu",
+        "CTkSegmentedButton",
         "CTkSlider",
         "CTkSwitch",
         "CTkProgressBar",
@@ -354,17 +356,20 @@ def test_window_builds_and_collects_request():
         app = _app(gui)
         assert app.request_box.get_value() == ""  # плейсхолдер — не текст
 
+        from universum.config import VolumeSize
+
         app.request_box.set_value("Квантовая механика")
         app.style_menu.set(Style.COLORFUL.label_ru)
         app._on_style_changed()
-        app.volume_slider.set(12)
+        app.volume_seg.set("Большой")
         app._on_volume_changed()
 
         request = app._collect_request()
         assert request.request_text == "Квантовая механика"
         assert request.style is Style.COLORFUL
         assert request.doc_type is DocType.LECTURE
-        assert request.volume.pages == 12
+        assert request.volume.size is VolumeSize.LARGE
+        assert request.volume.words == 3000  # жёсткий бюджет слов для промта
         assert request.file_path == ""
 
 
@@ -373,25 +378,28 @@ def test_test_type_switches_slider_to_questions():
         from universum.config import DocType
 
         app = _app(gui)
-        assert app.volume_slider._kwargs["from_"] == 1
-        assert app.volume_slider._kwargs["to"] == 30
+        # обычный документ: выбор размера, слайдер вопросов скрыт
+        assert app.volume_seg._visible is True
+        assert app.volume_slider._visible is False
 
         app.doc_menu.set(DocType.TEST.label_ru)
         app._on_type_changed()
+        assert app.volume_slider._visible is True
         assert app.volume_slider._kwargs["from_"] == 5
         assert app.volume_slider._kwargs["to"] == 50
+        assert app.volume_seg._visible is False
         assert app.variants_slider is not None
         assert app.variants_row._visible is True
 
         request = app._collect_request()
         assert request.doc_type is DocType.TEST
-        assert request.volume.pages == 5
         assert 5 <= request.volume.questions <= 50
         assert 2 <= request.volume.variants <= 6
 
         app.doc_menu.set(DocType.LECTURE.label_ru)
         app._on_type_changed()
-        assert app.volume_slider._kwargs["from_"] == 1
+        assert app.volume_slider._visible is False
+        assert app.volume_seg._visible is True
         assert app.variants_row._visible is False
 
 
@@ -446,21 +454,31 @@ def test_cancel_sets_event():
         assert app._cancel_event.is_set()
 
 
-def test_settings_window_is_modal_and_reused():
+def test_settings_window_is_non_modal_and_reused():
     with _gui_module() as gui:
         app = _app(gui)
         app._open_settings()
         first = app._settings_win
         assert first is not None
+        assert first._grabs == 0  # grab_set не вызывается: окно не блокирует главное
         app._open_settings()
         assert app._settings_win is first  # второе окно не создаётся
 
 
-def test_volume_label_pluralisation():
+def test_volume_size_selector_and_label():
     with _gui_module() as gui:
-        assert gui._plural_pages(1) == "страница"
-        assert gui._plural_pages(3) == "страницы"
-        assert gui._plural_pages(25) == "страниц"
+        from universum.config import VolumeSize
+
+        app = _app(gui)
+        assert app.volume_seg._kwargs["values"] == ["Маленький", "Средний", "Большой"]
+        app.volume_seg.set("Маленький")
+        app._on_volume_changed()
+        assert "«Маленький»" in app.volume_value._kwargs["text"]
+        assert "500" in app.volume_value._kwargs["text"]
+        assert "1–2 страницы" in app.volume_value._kwargs["text"]
+        request = app._collect_request()
+        assert request.volume.size is VolumeSize.SMALL
+        assert request.volume.words == 500
 
 
 # ---------------------------------------------------------------------------

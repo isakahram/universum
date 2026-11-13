@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -188,6 +189,41 @@ def is_localhost_url(url: str) -> bool:
     return "localhost" in u or "127.0.0.1" in u or "[::1]" in u
 
 
+def normalize_endpoint_url(url: str) -> str:
+    """Привести URL OpenAI-совместимого эндпоинта к рабочему виду.
+
+    AnyModel и другие сервисы ждут POST на ``/v1/chat/completions``: базовый
+    URL ``https://anymodel.org/v1`` (без хвоста) или лишние слэши в конце
+    дают HTTP 405 Method Not Allowed — а редирект со слэшем вообще превращает
+    POST в GET. Функция добавляет схему, убирает лишние слэши и дописывает
+    недостающий хвост ``/chat/completions``. Правильный метод (POST) задаётся
+    на уровне запроса в ``llm_client``.
+
+    Args:
+        url: URL как его ввёл пользователь (может быть без схемы и хвоста).
+
+    Returns:
+        Нормализованный URL (пустая строка, если вход пустой).
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if "://" not in u:
+        u = ("http://" if is_localhost_url(u) else "https://") + u
+    scheme_end = u.index("://") + 3
+    head, rest = u[:scheme_end], u[scheme_end:]
+    rest = re.sub(r"/{2,}", "/", rest).rstrip("/")
+    if rest.lower().endswith("chat/completions"):
+        tail = ""
+    elif re.search(r"/v\d+$", rest, re.I):
+        tail = "/chat/completions"
+    elif "/" not in rest:
+        tail = "/v1/chat/completions"
+    else:
+        tail = "/chat/completions"
+    return head + rest + tail
+
+
 def migrate_pollinations_url(url: str) -> str:
     """Мигрировать старый URL Pollinations на новый gen.pollinations.ai."""
     u = (url or "").strip()
@@ -224,11 +260,16 @@ class LlmSettings:
     api_key: str = ""
 
     def resolved_url(self) -> str:
-        """URL с учётом пресета провайдера (старый Pollinations мигрируется)."""
+        """URL с учётом пресета провайдера.
+
+        Старый Pollinations мигрируется, путь приводится к ``/chat/completions``:
+        базовый URL без хвоста (например ``https://anymodel.org/v1``) даёт
+        HTTP 405 Method Not Allowed.
+        """
         if self.url.strip():
-            return migrate_pollinations_url(self.url.strip())
+            return normalize_endpoint_url(migrate_pollinations_url(self.url.strip()))
         preset = PROVIDER_PRESETS.get(self.provider, {})
-        return migrate_pollinations_url(str(preset.get("url", "")))
+        return normalize_endpoint_url(migrate_pollinations_url(str(preset.get("url", ""))))
 
     def resolved_model(self) -> str:
         """Модель с учётом пресета провайдера (старая Pollinations мигрируется)."""
@@ -381,20 +422,31 @@ class LlmConfig:
     def endpoints(self) -> list[tuple[str, str, bool]]:
         """Цепочка эндпоинтов (url, model, send_key) в порядке приоритета.
 
+        Явный выбор провайдера (свой URL/пресет — AnyModel, OpenAI, Ollama…)
+        означает «работать только с ним»: молчаливое переключение на чужие
+        сервисы уводит запросы пользователя и маскирует настоящую ошибку
+        (например, HTTP 405 от AnyModel превращался в «Ollama не запущена»).
+
         send_key=True только для удалённых эндпоинтов с ключом (не для localhost).
         """
         chain: list[tuple[str, str, bool]] = []
         has_key = bool(normalize_api_key(self.api_key))
+
+        def _entry(url: str, model: str) -> tuple[str, str, bool]:
+            # Ключ шлём всегда, если он задан и эндпоинт не localhost.
+            # ВАЖНО: gen.pollinations.ai требует ключ (sk_/pk_).
+            return (normalize_endpoint_url(url), model, has_key and not is_localhost_url(url))
+
         if self.custom_url:
-            chain.append((self.custom_url, self.model, has_key and not is_localhost_url(self.custom_url)))
-        # Primary: ключ шлём всегда, если он задан и эндпоинт не localhost.
-        # ВАЖНО: gen.pollinations.ai требует ключ (sk_/pk_) — раньше для
-        # провайдера Pollinations ключ принудительно не отправлялся, из-за чего
-        # сервер отвечал 401, хотя ключ рабочий.
-        primary_send_key = has_key and not is_localhost_url(self.primary_url)
-        chain.append((self.primary_url, self.model, primary_send_key))
-        # Ollama всегда без ключа
-        chain.append((self.ollama_url, self.ollama_model, False))
+            chain.append(_entry(self.custom_url, self.model))
+            return chain
+        chain.append(_entry(self.primary_url, self.model))
+        # Резервный Ollama — только у бесплатной связки Pollinations → Ollama
+        # (Ollama всегда без ключа).
+        if self.provider is LlmProvider.POLLINATIONS and not is_localhost_url(self.primary_url):
+            fallback = normalize_endpoint_url(self.ollama_url)
+            if fallback and fallback != chain[0][0]:
+                chain.append((fallback, self.ollama_model, False))
         return chain
 
 
@@ -448,21 +500,68 @@ class Limits:
 # Объём документа
 # ---------------------------------------------------------------------------
 
+class VolumeSize(str, Enum):
+    """Абстрактный объём документа (вместо точного числа страниц).
+
+    Нейросеть плохо понимает «5 страниц», зато точно следует бюджету слов:
+    поэтому в интерфейсе выбор размера, а в промт уходит жёсткий лимит слов.
+    """
+
+    SMALL = "small"    # «Маленький»
+    MEDIUM = "medium"  # «Средний»
+    LARGE = "large"    # «Большой»
+
+    @property
+    def label_ru(self) -> str:
+        return {
+            VolumeSize.SMALL: "Маленький",
+            VolumeSize.MEDIUM: "Средний",
+            VolumeSize.LARGE: "Большой",
+        }[self]
+
+    @property
+    def target_words(self) -> int:
+        """Целевой объём основного текста в словах (жёсткий бюджет для промта)."""
+        return {
+            VolumeSize.SMALL: 500,
+            VolumeSize.MEDIUM: 1500,
+            VolumeSize.LARGE: 3000,
+        }[self]
+
+    @property
+    def pages_label(self) -> str:
+        """Ориентир в страницах A4 для подписи в интерфейсе."""
+        return {
+            VolumeSize.SMALL: "1–2 страницы",
+            VolumeSize.MEDIUM: "3–5 страниц",
+            VolumeSize.LARGE: "6–10 страниц",
+        }[self]
+
+
 @dataclass(frozen=True)
 class Volume:
-    """Объём документа: страницы (лекция/конспект/ДЗ) или вопросы (тест)."""
+    """Объём документа: размер (лекция/конспект/ДЗ) или вопросы (тест).
 
-    pages: int = 5
+    ``size`` — абстрактный объём («Маленький»/«Средний»/«Большой»),
+    который конвертируется в бюджет слов для промта (500/1500/3000).
+    """
+
+    size: VolumeSize = VolumeSize.MEDIUM
     questions: int = 10
     variants: int = 4
 
     def __post_init__(self) -> None:
-        if not (1 <= self.pages <= 30):
-            raise ValueError("pages должен быть от 1 до 30")
+        # строка из GUI/тестов («small») приводится к перечислению
+        object.__setattr__(self, "size", VolumeSize(self.size))
         if not (1 <= self.questions <= 50):
             raise ValueError("questions должен быть от 1 до 50")
         if not (2 <= self.variants <= 6):
             raise ValueError("variants должен быть от 2 до 6")
+
+    @property
+    def words(self) -> int:
+        """Целевой объём текста в словах (500/1500/3000)."""
+        return self.size.target_words
 
 
 # ---------------------------------------------------------------------------

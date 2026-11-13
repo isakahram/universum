@@ -1045,9 +1045,7 @@ def build_plan_prompt(ctx: PromptContext, sections: int) -> str:
     Returns:
         Промт для LLM.
     """
-    from .sections import target_words
-
-    words = target_words(ctx.volume.pages)
+    words = ctx.volume.words
     per_section = max(120, words // max(1, sections))
     structure_block = ""
     if ctx.structure_text.strip():
@@ -1159,7 +1157,7 @@ def build_volume_fix_prompt(ctx: PromptContext, current_words: int, target: int)
     return (
         "\n\nИСПРАВЛЕНИЕ ОБЪЁМА: "
         + action
-        + f" Целевой объём — {target} слов (страниц: {ctx.volume.pages}). "
+        + f" Целевой объём — {target} слов (размер документа: «{ctx.volume.size.label_ru}»). "
         "Сохрани структуру, блоки definition/theorem/example/important/keyidea и титул."
     )
 
@@ -1240,17 +1238,15 @@ def volume_hint(ctx: PromptContext) -> str:
             f"Ключ ответов — отдельным разделом после всех вариантов, с новой страницы, с ответами на все {questions} "
             f"вопросов каждого из {variants} вариантов."
         )
-    from .sections import target_words
-    from .utils import plural_ru
-
-    words = target_words(ctx.volume.pages)
-    pages_text = f"{ctx.volume.pages} {plural_ru(ctx.volume.pages, 'страница', 'страницы', 'страниц')}"
+    size = ctx.volume.size
+    words = ctx.volume.words
     return (
-        f"ОБЪЁМ: {pages_text} A4 (11pt) — это ≈{words} слов основного текста "
-        f"(от {int(words * 0.8)} до {int(words * 1.2)}), без титульного листа и оглавления. "
-        f"Столько слов должно быть в тексте: считай объём по словам, а не «на глаз». "
-        f"Меньше {int(words * 0.7)} слов — брак (документ короче ползунка), "
-        f"больше {int(words * 1.3)} — тоже брак (не влезет в заданные страницы). "
+        f"ОБЪЁМ: «{size.label_ru}» ({size.pages_label} A4, 11pt) — это ровно ≈{words} слов "
+        f"основного текста (от {int(words * 0.8)} до {int(words * 1.2)}), "
+        f"без титульного листа и оглавления. "
+        f"Это жёсткий бюджет слов: считай объём по словам, а не «на глаз» или «на страницы». "
+        f"Меньше {int(words * 0.7)} слов — брак (документ короче нужного), "
+        f"больше {int(words * 1.3)} — тоже брак (документ раздут). "
         f"Не обрывай текст на полуслове: лучше короче, но с закрытыми окружениями."
     )
 
