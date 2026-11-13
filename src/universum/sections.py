@@ -12,7 +12,8 @@
    подрезается.
 
 Здесь же — оценки объёма: сколько слов в теле, сколько это страниц A4 и сколько
-разделов нужно на заданное число страниц.
+разделов нужно на заданный бюджет слов (500/1500/3000 для размеров
+«Маленький»/«Средний»/«Большой»).
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ __all__ = [
     "WORDS_PER_PAGE",
     "MAX_SECTIONS",
     "MIN_SECTION_WORDS",
-    "target_words",
     "count_words",
     "estimate_pages",
     "section_count",
@@ -45,18 +45,6 @@ WORDS_PER_PAGE = 420
 # ответы сервис не обрывает по лимиту токенов.
 MAX_SECTIONS = 24
 MIN_SECTION_WORDS = 90
-
-
-def target_words(pages: int) -> int:
-    """Целевой объём основного текста в словах.
-
-    Args:
-        pages: Страницы из интерфейса (1–30).
-
-    Returns:
-        Число слов (≈420 на страницу).
-    """
-    return max(150, int(pages) * WORDS_PER_PAGE)
 
 
 _WORD_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+")
@@ -104,17 +92,16 @@ def estimate_pages(body: str) -> float:
     return count_words(body) / WORDS_PER_PAGE
 
 
-def section_count(pages: int) -> int:
-    """Сколько разделов нужно, чтобы уложиться в объём.
+def section_count(words: int) -> int:
+    """Сколько разделов нужно, чтобы уложиться в бюджет слов.
 
     Args:
-        pages: Страницы из интерфейса.
+        words: Целевой объём документа в словах (500/1500/3000 из VolumeSize).
 
     Returns:
-        Число разделов (3…12).
+        Число разделов (3…MAX_SECTIONS).
     """
-    words = target_words(pages)
-    wanted = round(words / 350)  # ~350 слов на раздел — комфортный размер ответа
+    wanted = round(max(0, int(words)) / 350)  # ~350 слов на раздел — комфортный размер ответа
     return max(3, min(MAX_SECTIONS, wanted))
 
 
@@ -179,12 +166,12 @@ _DEFAULT_PLANS: dict[str, list[str]] = {
 }
 
 
-def fallback_plan(doc_type_value: str, pages: int, structure_text: str = "") -> list[str]:
+def fallback_plan(doc_type_value: str, words: int, structure_text: str = "") -> list[str]:
     """План на случай, если модель не вернула пригодный список.
 
     Args:
         doc_type_value: ``DocType.value`` («lecture» и т.д.).
-        pages: Страницы из интерфейса.
+        words: Целевой объём документа в словах.
         structure_text: Структура, заданная пользователем (приоритетнее).
 
     Returns:
@@ -201,7 +188,7 @@ def fallback_plan(doc_type_value: str, pages: int, structure_text: str = "") -> 
         if titles:
             return titles[:MAX_SECTIONS]
     base = list(_DEFAULT_PLANS.get(doc_type_value, _DEFAULT_PLANS["lecture"]))
-    wanted = section_count(pages)
+    wanted = section_count(words)
     while len(base) < wanted:
         base.insert(len(base) - 1, f"Дополнительный материал {len(base) - 3}")
     return base[: max(3, min(MAX_SECTIONS, wanted))] if wanted >= 3 else base

@@ -18,6 +18,7 @@ from universum.config import (
     LlmSettings,
     Style,
     Volume,
+    VolumeSize,
     is_localhost_url,
     mask_key,
     normalize_api_key,
@@ -92,7 +93,7 @@ def test_prompt_all_combos(dt, st):
         request_text="Тема: тестовая тема",
         doc_type=dt,
         style=st,
-        volume=Volume(pages=3, questions=5, variants=4),
+        volume=Volume(questions=5, variants=4),
         language="ru",
     )
     prompt = build_generation_prompt(ctx)
@@ -108,7 +109,7 @@ def test_prompt_with_sources():
         request_text="Экономика",
         doc_type=DocType.LECTURE,
         style=Style.STRICT,
-        volume=Volume(pages=2),
+        volume=Volume(size=VolumeSize.SMALL),
         use_web_search=True,
         web_sources=(("Example", "https://example.com"),),
         language="ru",
@@ -170,7 +171,7 @@ def test_settings_resolved():
     assert s.resolved_url() == "https://api.openai.com/v1/chat/completions"
     assert s.resolved_model() == "gpt-4o-mini"
     s2 = LlmSettings(provider=LlmProvider.CUSTOM, url="https://x.example/v1", model="m1")
-    assert s2.resolved_url() == "https://x.example/v1"
+    assert s2.resolved_url() == "https://x.example/v1/chat/completions"  # хвост дописывается
     assert "sk-" not in repr(s2)  # ключ не в repr
 
 
@@ -178,10 +179,38 @@ def test_config_from_settings_sends_key_only_remote():
     s = LlmSettings(provider=LlmProvider.OPENAI, api_key="sk-testkey1234")
     cfg = LlmConfig.from_settings(s)
     eps = cfg.endpoints
-    # Первый эндпоинт — OpenAI с ключом
-    assert eps[0][0] == "https://api.openai.com/v1/chat/completions"
-    assert eps[0][2] is True
-    # Ollama всегда без ключа
+    # Явный выбор провайдера — только его эндпоинт, с ключом
+    assert eps == [("https://api.openai.com/v1/chat/completions", "gpt-4o-mini", True)]
+
+
+def test_custom_provider_uses_only_its_endpoint():
+    """AnyModel и другие «свои» сервисы: никаких молчаливых фолбэков."""
+    cfg = LlmConfig.from_settings(
+        LlmSettings(
+            provider=LlmProvider.CUSTOM,
+            url="https://anymodel.org/v1",
+            model="ds/deepseek-v4-pro",
+            api_key="sk-t",
+        )
+    )
+    assert cfg.endpoints == [
+        ("https://anymodel.org/v1/chat/completions", "ds/deepseek-v4-pro", True)
+    ]
+
+    cfg_ollama = LlmConfig.from_settings(LlmSettings(provider=LlmProvider.OLLAMA))
+    assert [u for u, _m, _k in cfg_ollama.endpoints] == [
+        "http://localhost:11434/v1/chat/completions"
+    ]
+
+
+def test_pollinations_keeps_ollama_fallback():
+    """Бесплатная связка Pollinations → Ollama сохраняется (Ollama без ключа)."""
+    cfg = LlmConfig.from_settings(LlmSettings(provider=LlmProvider.POLLINATIONS))
+    eps = cfg.endpoints
+    assert [u for u, _m, _k in eps] == [
+        "https://gen.pollinations.ai/v1/chat/completions",
+        "http://localhost:11434/v1/chat/completions",
+    ]
     assert eps[-1][2] is False
 
 
@@ -272,7 +301,7 @@ def test_orchestrator_mocked(tmp_path, monkeypatch):
         return FakeResult()
 
     monkeypatch.setattr(orch_mod, "compile_with_repair", fake_compile)
-    req = GenerationRequest(request_text="Лекция по физике", doc_type=DocType.LECTURE, style=Style.STRICT, volume=Volume(pages=2))
+    req = GenerationRequest(request_text="Лекция по физике", doc_type=DocType.LECTURE, style=Style.STRICT, volume=Volume(size=VolumeSize.SMALL))
     result = orch.generate(req)
     assert result.pdf_path.exists()
     # Готовый документ = наша преамбула + тело от модели
@@ -961,15 +990,6 @@ def test_gui_keeps_orchestrator_protocol():
         assert needle in GUI_CODE
     assert "_progress_queue" in GUI_CODE
     assert "threading.Thread" in GUI_CODE
-
-
-@pytest.mark.parametrize(
-    "count,expected",
-    [(1, "страница"), (3, "страницы"), (5, "страниц"), (11, "страниц"), (21, "страница"), (22, "страницы")],
-)
-def test_plural_pages(count, expected):
-    plural = _gui_function("_plural_pages")
-    assert plural(count) == expected
 
 
 def test_customtkinter_is_declared_as_dependency():
@@ -1744,12 +1764,19 @@ def test_emergency_latex_strips_unknown_macros_and_envs():
 # ---------------------------------------------------------------------------
 
 
-def test_target_words_scales_with_pages():
-    from universum.sections import WORDS_PER_PAGE, target_words
-
-    assert target_words(1) == WORDS_PER_PAGE
-    assert target_words(5) == 5 * WORDS_PER_PAGE
-    assert target_words(0) >= 150  # защита от нуля
+def test_volume_sizes_carry_word_budget():
+    """Маленький/Средний/Большой → жёсткие 500/1500/3000 слов для промта."""
+    assert VolumeSize.SMALL.target_words == 500
+    assert VolumeSize.MEDIUM.target_words == 1500
+    assert VolumeSize.LARGE.target_words == 3000
+    assert Volume(size="small").words == 500  # строка из GUI приводится к перечислению
+    assert Volume().words == 1500
+    assert Volume(size=VolumeSize.LARGE).words == 3000
+    assert VolumeSize.SMALL.pages_label == "1–2 страницы"
+    assert VolumeSize.MEDIUM.pages_label == "3–5 страниц"
+    assert VolumeSize.LARGE.pages_label == "6–10 страниц"
+    with pytest.raises(ValueError):
+        Volume(questions=60)
 
 
 def test_count_words_ignores_commands_and_code():
@@ -1780,9 +1807,9 @@ def test_parse_plan_understands_markdown_and_numbering():
 def test_fallback_plan_uses_user_structure():
     from universum.sections import fallback_plan
 
-    titles = fallback_plan("lecture", 5, "1. Введение\n2. Теория\n3. Практика")
+    titles = fallback_plan("lecture", 1500, "1. Введение\n2. Теория\n3. Практика")
     assert titles == ["Введение", "Теория", "Практика"]
-    assert fallback_plan("lecture", 6)
+    assert fallback_plan("lecture", 3000)
 
 
 def test_trim_to_words_drops_sections_and_keeps_conclusions():
@@ -1818,19 +1845,24 @@ def test_volume_hint_contains_word_budget():
     from universum.prompts import PromptContext as Ctx
     from universum.prompts import volume_hint
 
-    hint = volume_hint(Ctx(request_text="x", doc_type=DocType.LECTURE, volume=Volume(pages=5)))
-    assert "2100" in hint          # 5 * 420
+    hint = volume_hint(Ctx(request_text="x", doc_type=DocType.LECTURE, volume=Volume()))
+    assert "1500" in hint             # жёсткий бюджет слов «Среднего»
+    assert "«Средний»" in hint
+    assert "3–5 страниц" in hint
     assert "слов" in hint
-    assert "5 страниц" in hint
+    hint_small = volume_hint(
+        Ctx(request_text="x", doc_type=DocType.LECTURE, volume=Volume(size=VolumeSize.SMALL))
+    )
+    assert "500" in hint_small and "«Маленький»" in hint_small
 
 
 def test_plan_and_section_prompts_carry_budget():
     from universum.prompts import PromptContext as Ctx
     from universum.prompts import build_plan_prompt, build_section_prompt
 
-    ctx = Ctx(request_text="Налоги", doc_type=DocType.LECTURE, volume=Volume(pages=5))
+    ctx = Ctx(request_text="Налоги", doc_type=DocType.LECTURE, volume=Volume())
     plan = build_plan_prompt(ctx, 6)
-    assert "6 разделов" in plan and "2100" in plan
+    assert "6 разделов" in plan and "1500" in plan
 
     section = build_section_prompt(ctx, title="Введение", index=1, total=6, words=350, outline=["Введение", "Выводы"])
     assert "≈350 слов" in section
@@ -1892,7 +1924,7 @@ def test_sectional_generation_builds_document_from_parts(monkeypatch, tmp_path):
         request_text="Налогообложение в России",
         doc_type=DocType.LECTURE,
         style=Style.NEON,
-        volume=Volume(pages=5),
+        volume=Volume(),
     )
     result = orch.generate(req)
 
@@ -1925,7 +1957,7 @@ def test_sectional_generation_uses_plan_fallback(monkeypatch, tmp_path):
         "compile_with_repair",
         lambda code, llm, **kwargs: (captured.setdefault("code", code), _FakeCompileResult(_fake_pdf(tmp_path)))[1],
     )
-    req = GenerationRequest(request_text="Кванты", doc_type=DocType.LECTURE, volume=Volume(pages=3))
+    req = GenerationRequest(request_text="Кванты", doc_type=DocType.LECTURE, volume=Volume())
     orch.generate(req)
     assert captured["code"].count("\\section") >= 3
 
@@ -1952,7 +1984,7 @@ def test_short_document_requests_more_text(monkeypatch, tmp_path):
         "compile_with_repair",
         lambda code, llm, **kwargs: (captured.setdefault("code", code), _FakeCompileResult(_fake_pdf(tmp_path)))[1],
     )
-    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(pages=1))
+    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(size=VolumeSize.SMALL))
     orch.generate(req)
 
     assert len(prompts) == 2
@@ -1989,7 +2021,7 @@ def test_emergency_compile_when_repair_fails(monkeypatch, tmp_path):
 
     monkeypatch.setattr(orch_mod, "compile_latex", fake_compile_latex)
 
-    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(pages=1))
+    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(size=VolumeSize.SMALL))
     result = orch.generate(req)
 
     assert result.simplified is True
@@ -2019,7 +2051,7 @@ def test_emergency_compile_reraises_when_even_simple_fails(monkeypatch, tmp_path
 
     monkeypatch.setattr(orch_mod, "compile_latex", lambda code, **kwargs: Failed)
 
-    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(pages=1))
+    req = GenerationRequest(request_text="Тема", doc_type=DocType.LECTURE, volume=Volume(size=VolumeSize.SMALL))
     with pytest.raises(LatexCompileError):
         orch.generate(req)
 
@@ -2065,3 +2097,131 @@ def test_compile_strips_unknown_command_without_llm(monkeypatch):
     assert out.success is True
     assert llm_calls == []            # модель не понадобилась
     assert "\\foobar" not in calls[1]  # команда вырезана
+
+
+# ---------------------------------------------------------------------------
+# Провайдеры: нормализация URL и честные ошибки (кейс AnyModel HTTP 405)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_endpoint_url_variants():
+    from universum.config import normalize_endpoint_url as norm
+
+    assert norm("https://anymodel.org/v1") == "https://anymodel.org/v1/chat/completions"
+    assert norm("https://anymodel.org/v1/") == "https://anymodel.org/v1/chat/completions"
+    assert norm("https://anymodel.org/v1//chat/completions/") == "https://anymodel.org/v1/chat/completions"
+    assert norm("https://anymodel.org") == "https://anymodel.org/v1/chat/completions"
+    assert norm("anymodel.org/v1") == "https://anymodel.org/v1/chat/completions"
+    assert norm("localhost:11434") == "http://localhost:11434/v1/chat/completions"
+    assert norm("https://api.deepseek.com/chat/completions") == "https://api.deepseek.com/chat/completions"
+    assert norm("  https://api.openai.com/v1/chat/completions  ") == "https://api.openai.com/v1/chat/completions"
+    assert norm("") == ""
+
+
+def test_anymodel_405_is_surfaced_not_masked_by_ollama(monkeypatch):
+    """HTTP 405 от выбранного провайдера виден как есть — без «Ollama не запущена»."""
+    import io
+    import urllib.error
+
+    from universum import llm_client as lc
+    from universum.utils import LlmError
+
+    cfg = LlmConfig.from_settings(
+        LlmSettings(
+            provider=LlmProvider.CUSTOM,
+            url="https://anymodel.org/v1",
+            model="ds/deepseek-v4-pro",
+            api_key="sk-t",
+        )
+    )
+    seen: dict[str, str] = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["method"] = req.get_method()
+        seen["url"] = req.full_url
+        raise urllib.error.HTTPError(
+            req.full_url, 405, "Method Not Allowed", {}, io.BytesIO(b"nope")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = lc.LlmClient(cfg)
+
+    # генерация: POST на нормализованный URL, ошибка — про AnyModel
+    with pytest.raises(LlmError) as exc:
+        client.generate("sys", "user")
+    msg = str(exc.value)
+    assert "405" in msg
+    assert "chat/completions" in msg       # подсказка про правильный URL
+    assert "ollama" not in msg.lower()     # чужая ошибка не маскирует настоящую
+    assert seen["method"] == "POST"
+    assert seen["url"] == "https://anymodel.org/v1/chat/completions"
+
+    # «Проверить соединение» — тот же метод и URL
+    ok, msg2 = client.test_connection()
+    assert ok is False
+    assert "405" in msg2
+    assert "ollama" not in msg2.lower()
+    assert seen["method"] == "POST"
+    assert seen["url"] == "https://anymodel.org/v1/chat/completions"
+
+
+def test_http_405_is_not_retried(monkeypatch):
+    """405 не лечится повтором — сразу понятное сообщение, без ожидания."""
+    import io
+    import urllib.error
+
+    from universum import llm_client as lc
+    from universum.utils import LlmError
+
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(
+            req.full_url, 405, "Method Not Allowed", {}, io.BytesIO(b"")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    cfg = LlmConfig.from_settings(
+        LlmSettings(provider=LlmProvider.CUSTOM, url="https://anymodel.org/v1", model="m")
+    )
+    with pytest.raises(LlmError) as exc:
+        lc.LlmClient(cfg).generate("s", "u")
+    assert calls["n"] == 1  # один запрос, без retry/backoff
+    assert "лишний слэш" in str(exc.value) or "chat/completions" in str(exc.value)
+
+
+def test_sectional_threshold_follows_volume_size(monkeypatch, tmp_path):
+    """«Маленький» — одним запросом, «Средний» — по разделам с планом."""
+    from universum.prompts import PLAN_SYSTEM_PROMPT, SECTION_SYSTEM_PROMPT
+
+    for size, expect_sectional in (
+        (VolumeSize.SMALL, False),
+        (VolumeSize.MEDIUM, True),
+        (VolumeSize.LARGE, True),
+    ):
+        orch = Orchestrator()
+        systems: list[str] = []
+
+        def fake_generate(system, user, progress=None, cancel_event=None):
+            systems.append(system)
+            if system == PLAN_SYSTEM_PROMPT:
+                return "1. Введение\n2. Теория\n3. Практика\n4. Выводы"
+            return "\\section{Часть}\n" + " ".join(["слово"] * 350)
+
+        monkeypatch.setattr(orch.llm, "generate", fake_generate)
+        import universum.orchestrator as orch_mod
+
+        monkeypatch.setattr(
+            orch_mod,
+            "compile_with_repair",
+            lambda code, llm, **kwargs: _FakeCompileResult(_fake_pdf(tmp_path)),
+        )
+        req = GenerationRequest(
+            request_text="Тема", doc_type=DocType.LECTURE, style=Style.STRICT,
+            volume=Volume(size=size),
+        )
+        orch.generate(req)
+        was_sectional = PLAN_SYSTEM_PROMPT in systems
+        assert was_sectional is expect_sectional, size
+        assert (SECTION_SYSTEM_PROMPT in systems) is expect_sectional, size

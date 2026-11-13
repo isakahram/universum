@@ -1,5 +1,10 @@
 """LLM-клиент: Pollinations (gen.pollinations.ai) + провайдеры с ключом + Ollama.
 
+Все запросы (включая «Проверить соединение») — строго POST на
+``<url>/chat/completions``; URL нормализуется через
+``config.normalize_endpoint_url`` (без лишних слэшей, с хвостом пути) —
+иначе AnyModel и подобные сервисы отвечают HTTP 405.
+
 Реализован на стандартной библиотеке urllib (без внешних зависимостей),
 с retry, таймаутами и цепочкой эндпоинтов. OpenAI-совместимый формат.
 
@@ -20,7 +25,15 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
-from .config import LlmConfig, get_config, is_localhost_url, is_pollinations_url, mask_key, normalize_api_key
+from .config import (
+    LlmConfig,
+    get_config,
+    is_localhost_url,
+    is_pollinations_url,
+    mask_key,
+    normalize_api_key,
+    normalize_endpoint_url,
+)
 from .utils import LlmError, get_logger, log_event
 
 ProgressFn = Callable[[str], None]
@@ -118,6 +131,13 @@ def friendly_http_error(code: int, detail: str, *, key_sent: bool | None = None,
     if code == 404:
         return (
             f"Эндпоинт не найден (HTTP 404). Проверьте URL и модель в «Настройках нейросети». Ответ: {d}"
+        )
+    if code == 405:
+        return (
+            f"Сервис не принимает запросы по этому адресу (HTTP 405 Method Not Allowed). "
+            f"Чаще всего причина в URL: он должен указывать на chat/completions "
+            f"(например, https://anymodel.org/v1 → https://anymodel.org/v1/chat/completions) "
+            f"и не должен заканчиваться лишним слэшем. Ответ сервера: {d}"
         )
     if code == 429:
         return f"Превышен лимит запросов (HTTP 429). Подождите минуту и попробуйте снова. Ответ: {d}"
@@ -218,7 +238,9 @@ class LlmClient:
             LlmError: Если все эндпоинты недоступны (с объединёнными ошибками).
         """
         errors: list[str] = []
-        for url, model, send_key in self.config.endpoints:
+        endpoints = self.config.endpoints
+        for index, (url, model, send_key) in enumerate(endpoints):
+            url = normalize_endpoint_url(url)  # все запросы, включая тестовые — POST на /chat/completions
             if cancel_event is not None and cancel_event.is_set():
                 raise LlmError("Генерация отменена пользователем.")
             if progress:
@@ -253,11 +275,22 @@ class LlmClient:
                         time.sleep(self.config.retry_backoff_sec * attempt)
             if endpoint_error:
                 errors.append(f"{url} ({model}): {endpoint_error}")
-            self.logger.warning("Endpoint %s exhausted, trying next", url)
-        details = "\n".join(errors) if errors else "нет деталей"
+            if index < len(endpoints) - 1:
+                self.logger.warning("Endpoint %s exhausted, trying next", url)
+            else:
+                self.logger.warning("Endpoint %s exhausted, no more endpoints", url)
+        if not errors:
+            raise LlmError(
+                "Нейросеть недоступна. Проверьте интернет, URL/модель/ключ в «Настройках нейросети»."
+            )
+        primary, *rest = errors
+        if not rest:
+            # один эндпоинт (явный выбор провайдера) — показываем ЕГО ошибку,
+            # без «Ollama не запущена» и других чужих сообщений
+            raise LlmError(primary)
         raise LlmError(
             "Нейросеть недоступна. Проверьте интернет, URL/модель/ключ в «Настройках нейросети».\n"
-            f"Ошибки по эндпоинтам:\n{details}"
+            "Ошибки по эндпоинтам (первый — основной):\n" + "\n".join(errors)
         )
 
     def test_connection(self, *, timeout: int = 30) -> tuple[bool, str]:
@@ -273,6 +306,7 @@ class LlmClient:
         if not endpoints:
             return False, "Нет настроенных эндпоинтов."
         url, model, send_key = endpoints[0]
+        url = normalize_endpoint_url(url)  # тот же URL и метод, что и при генерации
         payload: dict = {
             "model": model,
             "messages": [{"role": "user", "content": "ping"}],
@@ -315,7 +349,7 @@ class LlmClient:
             except Exception:
                 pass
             err = LlmError(friendly_http_error(e.code, detail, key_sent=bool(headers.get("Authorization")), url=url))
-            err.retryable = e.code not in (400, 401, 403, 404)  # type: ignore[attr-defined]
+            err.retryable = e.code not in (400, 401, 403, 404, 405)  # type: ignore[attr-defined]
             raise err from e
         except urllib.error.URLError as e:
             raise LlmError(friendly_network_error(e.reason, url)) from e
